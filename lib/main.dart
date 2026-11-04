@@ -1470,6 +1470,7 @@ class Engine {
     List<Candle>? c1Long,
     List<Candle>? c15Long,
     bool relaxed = false,
+    List<String>? trace,
   }) {
     if (c4.length < 60 || c1.length < 60 || c15.length < 60) return null;
 
@@ -1593,6 +1594,29 @@ class Engine {
 
     final bool trigBuy = triggerBull || (relaxed && internalBull);
     final bool trigSell = triggerBear || (relaxed && internalBear);
+
+    // Record what the coin did and did not have; the scanner turns this into
+    // the "kache ache" list when nothing passes.
+    if (trace != null) {
+      trace
+        ..add(t4.trend > 0
+            ? '4H bullish'
+            : t4.trend < 0
+                ? '4H bearish'
+                : '4H trend nei')
+        ..add(buyOb != null || sellOb != null
+            ? '1H order block ache'
+            : (bullFvg || bearFvg)
+                ? '1H FVG ache'
+                : '1H zone nei')
+        ..add(trigBuy || trigSell
+            ? '15M break valid'
+            : (internalBull || internalBear)
+                ? '15M internal break'
+                : '15M trigger nei')
+        ..add('score ${(buy > sell ? buy : sell).round()}/${threshold.round()}'
+            '${zoneNow == 'Premium' || zoneNow == 'Discount' ? ' • $zoneNow penalty' : ''}');
+    }
 
     if (buy >= threshold && bull4 && !bear4 && trigBuy && buy > sell) {
       double entry = px;
@@ -1955,6 +1979,7 @@ class _HS extends State<HomeScreen> {
   int _failed = 0;
   int _noBias = 0;
   int _biasNoSetup = 0;
+  final List<String> _nearMiss = <String>[];
   int _scanId = 0;
   String _feed = '';
   Timer? _timer;
@@ -1988,6 +2013,7 @@ class _HS extends State<HomeScreen> {
         _failed = 0;
         _noBias = 0;
         _biasNoSetup = 0;
+        _nearMiss.clear();
       });
     }
 
@@ -2056,6 +2082,10 @@ class _HS extends State<HomeScreen> {
                   } else {
                     _biasNoSetup++;
                   }
+                  final why = <String>[];
+                  Engine.multiTF(sym, w4, w1, w15,
+                      c4Long: c4, c1Long: c1, relaxed: true, trace: why);
+                  _nearMiss.add('$sym: ${why.join(' • ')}');
                 }
               });
             }
@@ -2357,6 +2387,34 @@ class _HS extends State<HomeScreen> {
                 label: const Text('Rescan'),
               ),
             ),
+            if (_nearMiss.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 26),
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16),
+                child: Text(
+                  'Kache kache eshechilo (koto duro):',
+                  style: TextStyle(
+                    color: K.text,
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              for (final line in _nearMiss.take(25))
+                Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                  child: Text(
+                    line,
+                    style: const TextStyle(
+                      color: K.muted,
+                      fontSize: 11,
+                      height: 1.35,
+                    ),
+                  ),
+                ),
+            ],
           ],
         ),
       );
