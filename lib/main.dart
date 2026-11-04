@@ -958,6 +958,7 @@ class Engine {
   static OrderBlock? _structureOb(
     List<Candle> c,
     int fromIndex,
+    int toIndex,
     bool bullish,
     double atrValue,
   ) {
@@ -965,7 +966,7 @@ class Engine {
     double? other;
     int bestIndex = fromIndex;
 
-    for (int i = c.length - 1; i > fromIndex; i--) {
+    for (int i = toIndex - 1; i > fromIndex; i--) {
       final range = c[i].high - c[i].low;
       if (range >= atrValue * 2) continue;
       if (bullish) {
