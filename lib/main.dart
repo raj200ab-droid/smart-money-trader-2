@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show SocketException;
 import 'dart:math';
 
 import 'package:flutter/material.dart';
@@ -279,7 +280,7 @@ class MarketData {
   }
 
   static void _markDown(_Feed f) {
-    _downUntil[f.name] = DateTime.now().add(const Duration(minutes: 3));
+    _downUntil[f.name] = DateTime.now().add(const Duration(minutes: 2));
   }
 
   static void _markUp(_Feed f) {
@@ -337,8 +338,29 @@ class MarketData {
     int gainers = 60,
     int losers = 40,
   }) async {
-    final errors = <String>[];
+    var errors = <String>[];
 
+    final attempt = await _scanOnce(gainers, losers, errors);
+    if (attempt.isNotEmpty) return attempt;
+
+    // Every feed is still cooling down after a failed scan (the skip window).
+    // skip window). Waiting is free here: the scan itself takes minutes.
+    if (_feeds.every(_isDown)) {
+      await Future<void>.delayed(const Duration(seconds: 20));
+      errors = <String>[];
+      final retry = await _scanOnce(gainers, losers, errors);
+      if (retry.isNotEmpty) return retry;
+    }
+
+    activeFeed = '';
+    throw MarketDataException(errors.isEmpty ? 'no feed' : errors.join(' | '));
+  }
+
+  static Future<List<CoinData>> _scanOnce(
+    int gainers,
+    int losers,
+    List<String> errors,
+  ) async {
     for (final feed in _feeds) {
       if (_isDown(feed)) {
         errors.add('${feed.name}: skipped (recently failed)');
@@ -361,9 +383,7 @@ class MarketData {
       }
       await Future<void>.delayed(_lag);
     }
-
-    activeFeed = '';
-    throw MarketDataException(errors.isEmpty ? 'no feed' : errors.join(' | '));
+    return <CoinData>[];
   }
 
   static List<CoinData> _pick(List<CoinData> all, int gainers, int losers) {
@@ -426,10 +446,20 @@ class MarketData {
   }
 
   static Future<dynamic> _getJson(String url) async {
-    final r = await http
-        .get(Uri.parse(url), headers: const <String, String>{
-      'Accept': 'application/json',
-    }).timeout(const Duration(seconds: 15));
+    final http.Response r;
+    try {
+      r = await http
+          .get(Uri.parse(url), headers: const <String, String>{
+        'Accept': 'application/json',
+      })
+          .timeout(const Duration(seconds: 15));
+    } on TimeoutException {
+      throw MarketDataException('timeout');
+    } on http.ClientException {
+      throw MarketDataException('no internet');
+    } on SocketException {
+      throw MarketDataException('no internet');
+    }
     if (r.statusCode == 451) {
       throw MarketDataException('geo-blocked (451)');
     }
@@ -1412,11 +1442,15 @@ class _HS extends State<HomeScreen> {
       if (!mounted || id != _scanId) return;
       var detail = e.toString().replaceAll('MarketDataException: ', '');
       if (detail.length > 120) detail = '${detail.substring(0, 120)}...';
+      final offline = detail.contains('no internet');
       setState(() {
         _loading = false;
         _feed = '';
-        _msg = 'Sab exchange block koreche ($detail). '
-            'VPN on koro ba por-e Rescan dao.';
+        _msg = offline
+            ? 'Internet nei (ba app ke network permission deya hoy nai). '
+                'WiFi/mobile data check koro, tarpor Rescan.'
+            : 'Exchange gulo block koreche ($detail). VPN on koro '
+                '(Japan/Hong Kong/Switzerland) tarpor Rescan.';
       });
     }
   }
