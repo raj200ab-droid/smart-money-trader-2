@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Java
@@ -25,54 +25,487 @@ jobs:
           flutter-version: '3.16.0'
           channel: 'stable'
 
-      # ===== SAVE our custom files =====
-      - name: Save Custom Files
+      # ========= CREATE FULL PROJECT FROM SCRATCH =========
+      - name: Create Project & All Files
         run: |
-          echo "Saving custom files..."
-          mkdir -p /tmp/backup
-          cp lib/main.dart /tmp/backup/main.dart
-          cp pubspec.yaml /tmp/backup/pubspec.yaml
-          echo "Files saved successfully!"
+          flutter create . --org com.smartmoney --project-name smart_money_trader --platforms android
 
-      # ===== Create Flutter Project (generates android folder etc) =====
-      - name: Create Flutter Project Structure
-        run: flutter create . --org com.smartmoney --project-name smart_money_trader --platforms android
+          # ---- pubspec.yaml ----
+          cat > pubspec.yaml << 'PYEOF'
+          name: smart_money_trader
+          description: Smart Money Trading Signal App
+          publish_to: 'none'
+          version: 1.0.0+1
 
-      # ===== RESTORE our custom files (overwrite defaults) =====
-      - name: Restore Custom Files
+          environment:
+            sdk: '>=2.18.0 <4.0.0'
+
+          dependencies:
+            flutter:
+              sdk: flutter
+            http: ^1.1.0
+
+          dev_dependencies:
+            flutter_test:
+              sdk: flutter
+            flutter_lints: ^3.0.1
+
+          flutter:
+            uses-material-design: true
+          PYEOF
+
+          echo "=== pubspec.yaml created ==="
+          cat pubspec.yaml
+
+      # ---- main.dart ----
+      - name: Write main.dart
         run: |
-          echo "Restoring custom files..."
-          cp /tmp/backup/main.dart lib/main.dart
-          cp /tmp/backup/pubspec.yaml pubspec.yaml
-          echo "Files restored successfully!"
-          echo "--- main.dart head ---"
-          head -5 lib/main.dart
-          echo "--- pubspec.yaml head ---"
-          head -5 pubspec.yaml
+          cat > lib/main.dart << 'DARTEOF'
+          // ============================================
+          //  SMART MONEY TRADING SIGNAL APP
+          //  Binance Spot Trade - Multi-Timeframe
+          //  4H + 1H + 15M Analysis
+          // ============================================
+          import 'dart:async';
+          import 'dart:convert';
+          import 'dart:math';
+          import 'package:flutter/material.dart';
+          import 'package:flutter/services.dart';
+          import 'package:http/http.dart' as http;
 
-      # ===== Build =====
-      - name: Install Dependencies
-        run: flutter pub get
+          void main() {
+            WidgetsFlutterBinding.ensureInitialized();
+            SystemChrome.setPreferredOrientations([
+              DeviceOrientation.portraitUp,
+              DeviceOrientation.portraitDown,
+            ]);
+            SystemChrome.setSystemUIOverlayStyle(
+              const SystemUiOverlayStyle(
+                statusBarColor: Color(0xFF0D1117),
+                statusBarIconBrightness: Brightness.light,
+              ),
+            );
+            runApp(const MyApp());
+          }
 
-      - name: Build APK
-        run: flutter build apk --release
+          class MyApp extends StatelessWidget {
+            const MyApp({Key? key}) : super(key: key);
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                title: 'Smart Money Trader',
+                debugShowCheckedModeBanner: false,
+                theme: ThemeData(
+                  brightness: Brightness.dark,
+                  primarySwatch: Colors.green,
+                  scaffoldBackgroundColor: const Color(0xFF0D1117),
+                  appBarTheme: const AppBarTheme(
+                    backgroundColor: Color(0xFF161B22),
+                    elevation: 0,
+                  ),
+                ),
+                home: const HomeScreen(),
+              );
+            }
+          }
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: smart-money-trader-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          // ================== MODELS ==================
+          class Candle {
+            final int openTime, closeTime;
+            final double open, high, low, close, volume;
+            Candle({
+              required this.openTime,
+              required this.open,
+              required this.high,
+              required this.low,
+              required this.close,
+              required this.volume,
+              required this.closeTime,
+            });
+            factory Candle.fromJson(List<dynamic> j) => Candle(
+              openTime: j[0] as int,
+              open: double.parse(j[1].toString()),
+              high: double.parse(j[2].toString()),
+              low: double.parse(j[3].toString()),
+              close: double.parse(j[4].toString()),
+              volume: double.parse(j[5].toString()),
+              closeTime: j[6] as int,
+            );
+            bool get isBullish => close > open;
+            bool get isBearish => close < open;
+            double get bodySize => (close - open).abs();
+          }
 
-      - name: Upload APK (Arm64)
-        uses: actions/upload-artifact@v4
-        with:
-          name: smart-money-trader-arm64
-          path: build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
-        continue-on-error: true
+          class CoinData {
+            final String symbol;
+            final double lastPrice, priceChangePercent, highPrice, lowPrice, quoteVolume;
+            CoinData({
+              required this.symbol,
+              required this.lastPrice,
+              required this.priceChangePercent,
+              required this.highPrice,
+              required this.lowPrice,
+              required this.quoteVolume,
+            });
+            factory CoinData.fromJson(Map<String, dynamic> j) => CoinData(
+              symbol: j['symbol'],
+              lastPrice: double.parse(j['lastPrice'].toString()),
+              priceChangePercent: double.parse(j['priceChangePercent'].toString()),
+              highPrice: double.parse(j['highPrice'].toString()),
+              lowPrice: double.parse(j['lowPrice'].toString()),
+              quoteVolume: double.parse(j['quoteVolume'].toString()),
+            );
+          }
 
-      - name: Upload APK (ArmV7)
-        uses: actions/upload-artifact@v4
-        with:
-          name: smart-money-trader-armv7
-          path: build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
-        continue-on-error: true
+          class OrderBlock {
+            final double high, low;
+            final String type;
+            final int index;
+            OrderBlock({required this.high, required this.low, required this.type, required this.index});
+            double get mid => (high + low) / 2;
+          }
+
+          class FVG {
+            final double high, low;
+            final String type;
+            final int index;
+            FVG({required this.high, required this.low, required this.type, required this.index});
+          }
+
+          class SwingPoint {
+            final double price;
+            final int index;
+            final String type;
+            SwingPoint({required this.price, required this.index, required this.type});
+          }
+
+          class TimeframeAnalysis {
+            final String timeframe, structure;
+            final String? bos, sweep;
+            final double buyScore, sellScore;
+            final bool volumeSpike;
+            final List<String> buyConf, sellConf;
+            final OrderBlock? bullOB, bearOB;
+            final List<FVG> fvgs;
+            TimeframeAnalysis({
+              required this.timeframe,
+              required this.structure,
+              this.bos,
+              this.sweep,
+              required this.buyScore,
+              required this.sellScore,
+              required this.volumeSpike,
+              required this.buyConf,
+              required this.sellConf,
+              this.bullOB,
+              this.bearOB,
+              required this.fvgs,
+            });
+          }
+
+          class TradeSignal {
+            final String symbol, direction, tf4h, tf1h, tf15m;
+            final double entry, sl, tp, confidence;
+            final List<String> confirmations;
+            final DateTime time;
+            TradeSignal({
+              required this.symbol,
+              required this.direction,
+              required this.entry,
+              required this.sl,
+              required this.tp,
+              required this.confidence,
+              required this.confirmations,
+              required this.time,
+              required this.tf4h,
+              required this.tf1h,
+              required this.tf15m,
+            });
+            double get profitPct => direction == 'BUY'
+                ? ((tp - entry) / entry) * 100
+                : ((entry - tp) / entry) * 100;
+            double get riskPct => direction == 'BUY'
+                ? ((entry - sl) / entry) * 100
+                : ((sl - entry) / entry) * 100;
+            double get rr => riskPct == 0 ? 0 : profitPct / riskPct;
+            String get coin => symbol.replaceAll('USDT', '');
+          }
+
+          // ================== API ==================
+          class BinanceApi {
+            static const _urls = [
+              'https://api.binance.com/api/v3',
+              'https://api1.binance.com/api/v3',
+              'https://api2.binance.com/api/v3',
+              'https://api3.binance.com/api/v3',
+            ];
+            static int _i = 0;
+            static String get _base => _urls[_i];
+            static void _rot() => _i = (_i + 1) % _urls.length;
+
+            static Future<List<CoinData>> topGainers({int limit = 100}) async {
+              for (int a = 0; a < _urls.length; a++) {
+                try {
+                  final r = await http.get(Uri.parse('$_base/ticker/24hr'))
+                      .timeout(const Duration(seconds: 20));
+                  if (r.statusCode == 200) {
+                    var data = json.decode(r.body) as List;
+                    var coins = data
+                        .map((e) => CoinData.fromJson(e))
+                        .where((c) => c.symbol.endsWith('USDT'))
+                        .where((c) => c.symbol != 'USDTUSDT')
+                        .where((c) => c.quoteVolume > 5000000)
+                        .where((c) => c.priceChangePercent > 0)
+                        .toList();
+                    coins.sort((a, b) => b.priceChangePercent.compareTo(a.priceChangePercent));
+                    return coins.take(limit).toList();
+                  }
+                  _rot();
+                } catch (_) {
+                  _rot();
+                }
+              }
+              throw Exception('VPN ON koro');
+            }
+
+            static Future<List<Candle>> candles(String sym, String tf, int lim) async {
+              for (int a = 0; a < _urls.length; a++) {
+                try {
+                  final r = await http.get(
+                      Uri.parse('$_base/klines?symbol=$sym&interval=$tf&limit=$lim'))
+                      .timeout(const Duration(seconds: 15));
+                  if (r.statusCode == 200) {
+                    return (json.decode(r.body) as List).map((e) => Candle.fromJson(e)).toList();
+                  }
+                  _rot();
+                } catch (_) {
+                  _rot();
+                }
+              }
+              throw Exception('Fail: $sym');
+            }
+          }
+
+          // ================== SMART MONEY ENGINE ==================
+          class Engine {
+            static List<SwingPoint> swings(List<Candle> c, {int lb = 5}) {
+              var pts = <SwingPoint>[];
+              for (int i = lb; i < c.length - lb; i++) {
+                bool sh = true, sl = true;
+                for (int j = i - lb; j <= i + lb; j++) {
+                  if (j == i) continue;
+                  if (c[j].high >= c[i].high) sh = false;
+                  if (c[j].low <= c[i].low) sl = false;
+                }
+                if (sh) pts.add(SwingPoint(price: c[i].high, index: i, type: 'high'));
+                if (sl) pts.add(SwingPoint(price: c[i].low, index: i, type: 'low'));
+              }
+              return pts;
+            }
+
+            static String structure(List<SwingPoint> p) {
+              var h = p.where((x) => x.type == 'high').toList();
+              var l = p.where((x) => x.type == 'low').toList();
+              if (h.length < 2 || l.length < 2) return 'NEUTRAL';
+              if (h.last.price > h[h.length - 2].price && l.last.price > l[l.length - 2].price)
+                return 'BULLISH';
+              if (h.last.price < h[h.length - 2].price && l.last.price < l[l.length - 2].price)
+                return 'BEARISH';
+              return 'NEUTRAL';
+            }
+
+            static String? bos(List<Candle> c, List<SwingPoint> p) {
+              if (p.isEmpty) return null;
+              double px = c.last.close;
+              var h = p.where((x) => x.type == 'high').toList();
+              var l = p.where((x) => x.type == 'low').toList();
+              if (h.isNotEmpty && px > h.last.price) return 'BULLISH_BOS';
+              if (l.isNotEmpty && px < l.last.price) return 'BEARISH_BOS';
+              return null;
+            }
+
+            static List<OrderBlock> obs(List<Candle> c) {
+              var res = <OrderBlock>[];
+              double avg = 0;
+              int n = 0;
+              for (int i = max(0, c.length - 30); i < c.length; i++) {
+                avg += c[i].bodySize;
+                n++;
+              }
+              if (n > 0) avg /= n;
+              if (avg == 0) return res;
+              for (int i = 1; i < c.length - 1; i++) {
+                if (c[i].isBearish && c[i + 1].isBullish && c[i + 1].bodySize > avg * 1.3)
+                  res.add(OrderBlock(high: c[i].high, low: c[i].low, type: 'bullish', index: i));
+                if (c[i].isBullish && c[i + 1].isBearish && c[i + 1].bodySize > avg * 1.3)
+                  res.add(OrderBlock(high: c[i].high, low: c[i].low, type: 'bearish', index: i));
+              }
+              return res.where((o) => o.index > c.length - 60).toList();
+            }
+
+            static List<FVG> fvgs(List<Candle> c) {
+              var res = <FVG>[];
+              for (int i = 1; i < c.length - 1; i++) {
+                if (c[i - 1].high < c[i + 1].low)
+                  res.add(FVG(high: c[i + 1].low, low: c[i - 1].high, type: 'bullish', index: i));
+                if (c[i - 1].low > c[i + 1].high)
+                  res.add(FVG(high: c[i - 1].low, low: c[i + 1].high, type: 'bearish', index: i));
+              }
+              return res.where((f) => f.index > c.length - 60).toList();
+            }
+
+            static String? sweep(List<Candle> c, List<SwingPoint> p) {
+              if (c.length < 3) return null;
+              var last = c.last;
+              var h = p.where((x) => x.type == 'high').toList();
+              var l = p.where((x) => x.type == 'low').toList();
+              if (l.isNotEmpty && last.low < l.last.price && last.close > l.last.price)
+                return 'BULLISH_SWEEP';
+              if (h.isNotEmpty && last.high > h.last.price && last.close < h.last.price)
+                return 'BEARISH_SWEEP';
+              return null;
+            }
+
+            static bool volSpike(List<Candle> c) {
+              if (c.length < 20) return false;
+              double avg = 0;
+              for (int i = c.length - 20; i < c.length - 1; i++) avg += c[i].volume;
+              avg /= 19;
+              return c.last.volume > avg * 1.5;
+            }
+
+            static TimeframeAnalysis analyze(String tf, List<Candle> c) {
+              var pts = swings(c);
+              String str = structure(pts);
+              String? b = bos(c, pts);
+              var obList = obs(c);
+              var fvgList = fvgs(c);
+              String? sw = sweep(c, pts);
+              bool vs = volSpike(c);
+              double px = c.last.close;
+
+              double bs = 0, ss = 0;
+              var bc = <String>[], sc = <String>[];
+              OrderBlock? bo, so;
+
+              if (str == 'BULLISH' || b == 'BULLISH_BOS') {
+                bs += 25;
+                bc.add('Bullish Structure');
+              }
+              if (str == 'BEARISH' || b == 'BEARISH_BOS') {
+                ss += 25;
+                sc.add('Bearish Structure');
+              }
+              for (var o in obList.where((x) => x.type == 'bullish')) {
+                if (px >= o.low * 0.998 && px <= o.high * 1.002) {
+                  bo = o; bs += 25; bc.add('Bullish OB'); break;
+                }
+              }
+              for (var o in obList.where((x) => x.type == 'bearish')) {
+                if (px >= o.low * 0.998 && px <= o.high * 1.002) {
+                  so = o; ss += 25; sc.add('Bearish OB'); break;
+                }
+              }
+              for (var f in fvgList.where((x) => x.type == 'bullish')) {
+                if (px >= f.low * 0.998 && px <= f.high * 1.002) {
+                  bs += 15; bc.add('Bullish FVG'); break;
+                }
+              }
+              for (var f in fvgList.where((x) => x.type == 'bearish')) {
+                if (px >= f.low * 0.998 && px <= f.high * 1.002) {
+                  ss += 15; sc.add('Bearish FVG'); break;
+                }
+              }
+              if (sw == 'BULLISH_SWEEP') { bs += 15; bc.add('Bullish Sweep'); }
+              if (sw == 'BEARISH_SWEEP') { ss += 15; sc.add('Bearish Sweep'); }
+              if (vs) { bs += 10; ss += 10; bc.add('Volume Spike'); sc.add('Volume Spike'); }
+
+              return TimeframeAnalysis(
+                timeframe: tf,
+                structure: str,
+                bos: b,
+                sweep: sw,
+                buyScore: bs,
+                sellScore: ss,
+                volumeSpike: vs,
+                buyConf: bc,
+                sellConf: sc,
+                bullOB: bo,
+                bearOB: so,
+                fvgs: fvgList,
+              );
+            }
+
+            static TradeSignal? multiTF(String sym, List<Candle> c4, List<Candle> c1, List<Candle> c15) {
+              var t4 = analyze('4H', c4);
+              var t1 = analyze('1H', c1);
+              var t15 = analyze('15M', c15);
+
+              double buy = 0, sell = 0;
+              var bC = <String>[], sC = <String>[];
+
+              bool t4Bull = t4.structure == 'BULLISH' || t4.bos == 'BULLISH_BOS';
+              bool t4Bear = t4.structure == 'BEARISH' || t4.bos == 'BEARISH_BOS';
+              if (t4Bull) { buy += 40; bC.add('4H: Bullish Trend'); }
+              if (t4Bear) { sell += 40; sC.add('4H: Bearish Trend'); }
+
+              if (t1.bullOB != null) { buy += 20; bC.add('1H: Bullish OB'); }
+              if (t1.bearOB != null) { sell += 20; sC.add('1H: Bearish OB'); }
+              if (t1.buyConf.any((c) => c.contains('FVG'))) { buy += 15; bC.add('1H: Bullish FVG'); }
+              if (t1.sellConf.any((c) => c.contains('FVG'))) { sell += 15; sC.add('1H: Bearish FVG'); }
+
+              if (t15.bos == 'BULLISH_BOS' || t15.sweep == 'BULLISH_SWEEP') { buy += 15; bC.add('15M: Trigger'); }
+              if (t15.bos == 'BEARISH_BOS' || t15.sweep == 'BEARISH_SWEEP') { sell += 15; sC.add('15M: Trigger'); }
+              if (t15.volumeSpike) { buy += 10; sell += 10; bC.add('15M: Volume'); sC.add('15M: Volume'); }
+
+              double px = c15.last.close;
+
+              if (buy >= 55 && t4Bull && buy > sell) {
+                double e = px, s;
+                if (t1.bullOB != null) {
+                  e = t1.bullOB!.mid;
+                  s = t1.bullOB!.low * 0.997;
+                } else if (t4.bullOB != null) {
+                  e = t4.bullOB!.mid;
+                  s = t4.bullOB!.low * 0.997;
+                } else {
+                  var lows = swings(c1).where((p) => p.type == 'low').toList();
+                  s = lows.isNotEmpty ? lows.last.price * 0.997 : px * 0.985;
+                }
+                if (s >= e) s = e * 0.985;
+                return TradeSignal(
+                  symbol: sym,
+                  direction: 'BUY',
+                  entry: e,
+                  sl: s,
+                  tp: e * 1.01,
+                  confidence: buy.clamp(0, 100),
+                  confirmations: bC,
+                  time: DateTime.now(),
+                  tf4h: t4.structure,
+                  tf1h: t1.structure,
+                  tf15m: t15.structure,
+                );
+              }
+
+              if (sell >= 55 && t4Bear && sell > buy) {
+                double e = px, s;
+                if (t1.bearOB != null) {
+                  e = t1.bearOB!.mid;
+                  s = t1.bearOB!.high * 1.003;
+                } else if (t4.bearOB != null) {
+                  e = t4.bearOB!.mid;
+                  s = t4.bearOB!.high * 1.003;
+                } else {
+                  var highs = swings(c1).where((p) => p.type == 'high').toList();
+                  s = highs.isNotEmpty ? highs.last.price * 1.003 : px * 1.015;
+                }
+                if (s <= e) s = e * 1.015;
+                return TradeSignal(
+                  symbol: sym,
+                  direction: 'SELL',
+                  entry: e,
+                  sl: s,
+                  tp: e * 0.99,
+                  confidence: sell.clamp(0, 100),
+       
