@@ -10,18 +10,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
+
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.16.0'
           channel: 'stable'
-      - run: flutter create . --org com.smartmoney --project-name smart_money_trader --platforms android
-      - run: flutter pub get
-      - run: flutter build apk --release
-      - uses: actions/upload-artifact@v4
+
+      - name: Create Android Project
+        run: |
+          cp lib/main.dart /tmp/my_main.dart
+          cp pubspec.yaml /tmp/my_pubspec.yaml
+          flutter create . --org com.smartmoney --project-name smart_money_trader --platforms android
+          cp /tmp/my_main.dart lib/main.dart
+          cp /tmp/my_pubspec.yaml pubspec.yaml
+          echo "=== Files Restored ==="
+          head -3 lib/main.dart
+          head -3 pubspec.yaml
+
+      - name: Get Dependencies
+        run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
         with:
           name: smart-money-trader-apk
           path: build/app/outputs/flutter-apk/app-release.apk
