@@ -39,6 +39,21 @@ Signals fire in two passes: a **STRICT** pass (4H bias + 1H OB/FVG zone +
 pass with a lower threshold and no counter-trend gate. Watch signals are marked
 `WATCH` in the list.
 
+## Backtest
+
+The chart icon in the app bar opens a backtest screen: type a coin, hit **Run**,
+and the app fetches 1000 bars of 4h/1h/15m, then walks the 15M series bar by bar
+showing the engine only candles up to that bar (no look-ahead). Each signal is
+followed to its stop or target and the screen reports:
+
+- win rate, wins/losses, **total R** and average R per trade
+- win rate for STRICT-only signals (higher quality subset)
+- current win/loss streak and the full trade list
+
+Read the **total R**, not the win rate: at 2R targets a 40% win rate is
+profitable, while a 60% win rate at 1R can still lose. A sample of a few dozen
+trades is directional evidence, not proof.
+
 ## Signal output
 
 - Direction (BUY / SELL) and confidence score
