@@ -41,6 +41,17 @@ pass with a lower threshold and no counter-trend gate. Watch signals are marked
 
 ## Why the list can be empty
 
+The scanner runs three tiers and labels every card:
+
+| tier | meaning |
+|---|---|
+| **STRICT** | full confluence: 4H bias + 1H OB/FVG + live 15M swing break, score ≥ 60 |
+| **WATCH** | relaxed: internal 15M break accepted, score ≥ 40 |
+| **RADAR** | bias and a live 15M break exist, but the zone or the score is still missing — a candidate list, **not** a trade |
+
+The status panel also prints the build stamp (`v4 · radar`) and `pubspec.yaml`
+carries `4.0.0+4`, so the build installed on the phone is identifiable.
+
 The scanner reports *why* it found nothing. The status line tells you which of
 the two failure modes dominates across the 73 scanned coins:
 
