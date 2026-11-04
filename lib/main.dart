@@ -1513,9 +1513,13 @@ class Engine {
     final atr1 = t1.atr > 0 ? t1.atr : px * 0.01;
     final zoneLabel = t1.zoneOf;
 
-    final threshold = relaxed ? 45.0 : 60.0;
+    // 30 is a frozen 4H bias with nothing else: still not a trade.
+    final threshold = relaxed ? 40.0 : 60.0;
 
-    if (buy >= threshold && bull4 && !bear4 && buy > sell) {
+    final bool trigBuy = triggerBull || internalBull;
+    final bool trigSell = triggerBear || internalBear;
+
+    if (buy >= threshold && bull4 && !bear4 && trigBuy && buy > sell) {
       double entry = px;
       double sl;
 
@@ -1564,7 +1568,7 @@ class Engine {
       );
     }
 
-    if (sell >= threshold && bear4 && !bull4 && sell > buy) {
+    if (sell >= threshold && bear4 && !bull4 && trigSell && sell > buy) {
       double entry = px;
       double sl;
 
