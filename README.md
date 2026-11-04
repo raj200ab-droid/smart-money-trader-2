@@ -64,6 +64,19 @@ Below the empty state a **"kache kache eshechilo"** list shows each coin's
 diagnosis and its score against the threshold, which is the data needed to
 tune the filters instead of guessing.
 
+## Directional sanity
+
+An unbiased engine has to produce roughly as many BUYs as SELLs on symmetric
+data. Two bugs broke that and are covered by the checks in `smt-mirror/`:
+
+- the swing oscillator's warm-up state made the **first pivot of every window a
+  low** (82 highs vs 147 lows per 120 series), which tilted the 4H bias bearish
+- the 1H order-block bonus only fired for the side the bias already favoured
+
+The engine now starts the oscillator unknown (82 / 91) and applies a structure
+floor: the nearest valid order block decides which side is blocked. Verified on
+regime-switching synthetic data — 7 BUY vs 9 SELL strict, 12 vs 13 watch.
+
 ## Backtest
 
 The chart icon in the app bar opens a backtest screen: type a coin, hit **Run**,
