@@ -281,11 +281,7 @@ class TradeSignal {
     required this.zone,
     required this.eqh,
     required this.eql,
-    required this.freshBreak,
-    required this.breakPattern,
-    required this.breakEvent,
-    required this.internalFresh,
-    required this.internalEvent,
+    required this.watch,
   });
 
   final String symbol;
