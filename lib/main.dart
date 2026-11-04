@@ -210,6 +210,9 @@ class TFAnalysis {
     required this.breakEvent,
     required this.internalFresh,
     required this.internalEvent,
+    required this.breakLevel,
+    required this.breakAge,
+    required this.structureConflict,
   });
 
   final String timeframe;
@@ -252,6 +255,17 @@ class TFAnalysis {
   /// Same, for the 5-bar internal structure.
   final bool internalFresh;
   final String internalEvent;
+
+  /// Pivot price of the freshest swing break; price holding beyond it keeps
+  /// the 15M trigger alive.
+  final double breakLevel;
+
+  /// Bars since that break (0 = the last closed bar).
+  final int breakAge;
+
+  /// True when the long-window scan inverted the local bias (possible trend
+  /// exhaustion) — used as a warning, never to open a trade.
+  final bool structureConflict;
 
   String get zoneOf {
     if (premium <= 0) return 'Unknown';
@@ -879,9 +893,14 @@ class Engine {
     // happened `len` bars earlier.
     var os = 0;
     for (int n = 1; n < c.length; n++) {
+      // LUX reads ta.highest(len) / ta.lowest(len), i.e. the window
+      // [n-len+1 .. n] INCLUSIVE of the current bar. The window must contain
+      // the bar being tested against it (c[n-len]); with an exclusive window
+      // that bar can never exceed its own high/low, so no pivot would ever be
+      // confirmed and the whole engine stayed silent.
       double upper = double.negativeInfinity;
       double lower = double.infinity;
-      for (int i = n - len; i < n; i++) {
+      for (int i = n - len + 1; i <= n; i++) {
         if (i < 0) continue;
         if (c[i].high > upper) upper = c[i].high;
         if (c[i].low < lower) lower = c[i].low;
@@ -1186,10 +1205,18 @@ class Engine {
 
     final lastHigh = _lastUnbrokenHigh(pts);
     final lastLow = _lastUnbrokenLow(pts);
-    final trend = trendOf(pts);
 
-    final recent = breaks(c, pts, barsBack: 30);
+    // LUX keeps `var trend` and only flips it on a structure break, so the
+    // live bias is the direction of the freshest break — not the HH/HL shape
+    // of the last two pivots, which is 0 for most of the bar history and used
+    // to mute the whole engine.
+    final recent = breaks(c, pts, barsBack: c.length - 1);
     final internalRecent = breaks(c, internal, len: internalLen, barsBack: 6);
+
+    int trend = trendOf(pts);
+    if (recent.isNotEmpty) {
+      trend = recent.last.event == 'BULLISH' ? 1 : -1;
+    }
 
     final atr200 = atr(c, period: 200);
     final atrPer = atr(c);
@@ -1357,6 +1384,55 @@ class Engine {
       breakEvent: event,
       internalFresh: internalFresh,
       internalEvent: internalLast?.event ?? '',
+      breakLevel: lastBreak?.pivot.price ?? px,
+      breakAge: lastBreak == null ? 999 : c.length - 1 - lastBreak.bar,
+      structureConflict: false,
+    );
+  }
+
+  /// `analyze` plus a check against a much longer window of the same
+  /// timeframe. The 200-candle window holds only one or two swing pivots at
+  /// the LUX default length of 50, so the local bias can point up while the
+  /// longer structure has already rolled over. That is reported, never acted
+  /// on by itself.
+  static TFAnalysis analyzeLong(String tf, List<Candle> short, List<Candle> full) {
+    final local = analyze(tf, short);
+    if (full.length <= short.length) return local;
+    final longTrend = analyze(tf, full).trend;
+    if (longTrend == 0 || local.trend == 0) return local;
+    if (longTrend == local.trend) return local;
+    return TFAnalysis(
+      timeframe: local.timeframe,
+      structure: local.structure,
+      bos: local.bos,
+      sweep: local.sweep,
+      buyScore: local.buyScore,
+      sellScore: local.sellScore,
+      volumeSpike: local.volumeSpike,
+      buyConf: local.buyConf,
+      sellConf: local.sellConf,
+      obs: local.obs,
+      fvgs: local.fvgs,
+      candles: local.candles,
+      close: local.close,
+      atr: local.atr,
+      trend: local.trend,
+      choch: local.choch,
+      swingHigh: local.swingHigh,
+      swingLow: local.swingLow,
+      premium: local.premium,
+      equilibrium: local.equilibrium,
+      discount: local.discount,
+      eqh: local.eqh,
+      eql: local.eql,
+      freshBreak: local.freshBreak,
+      breakPattern: local.breakPattern,
+      breakEvent: local.breakEvent,
+      internalFresh: local.internalFresh,
+      internalEvent: local.internalEvent,
+      breakLevel: local.breakLevel,
+      breakAge: local.breakAge,
+      structureConflict: true,
     );
   }
 
@@ -1390,30 +1466,24 @@ class Engine {
     List<Candle> c4,
     List<Candle> c1,
     List<Candle> c15, {
+    List<Candle>? c4Long,
+    List<Candle>? c1Long,
+    List<Candle>? c15Long,
     bool relaxed = false,
   }) {
     if (c4.length < 60 || c1.length < 60 || c15.length < 60) return null;
 
-    final t4 = analyze('4H', c4);
-    final t1 = analyze('1H', c1);
+    final t4 = analyzeLong('4H', c4, c4Long ?? c4);
+    final t1 = analyzeLong('1H', c1, c1Long ?? c1);
     final t15 = analyze('15M', c15);
     final px = c15.last.close;
     if (px <= 0) return null;
 
-    // Bias: 4H structure, or a break that just happened. When 4H structure is
-    // neutral we accept a fresh 4H internal break confirmed by the 1H trend.
-    final bull4 = t4.trend > 0 ||
-        (t4.freshBreak && t4.breakEvent == 'BULLISH') ||
-        (t4.trend == 0 &&
-            t4.internalFresh &&
-            t4.internalEvent == 'BULLISH' &&
-            t1.trend > 0);
-    final bear4 = t4.trend < 0 ||
-        (t4.freshBreak && t4.breakEvent == 'BEARISH') ||
-        (t4.trend == 0 &&
-            t4.internalFresh &&
-            t4.internalEvent == 'BEARISH' &&
-            t1.trend < 0);
+    // Bias comes from the 4H structure alone. The old fallbacks (a 4H internal
+    // break, or 4H "neutral" borrowing the 1H trend) injected bias that the
+    // higher timeframe did not actually have.
+    final bull4 = t4.trend > 0;
+    final bear4 = t4.trend < 0;
 
     double buy = 0;
     double sell = 0;
@@ -1456,8 +1526,13 @@ class Engine {
       sC.add('1H bearish FVG');
     }
 
-    final triggerBull = t15.freshBreak && t15.breakEvent == 'BULLISH';
-    final triggerBear = t15.freshBreak && t15.breakEvent == 'BEARISH';
+    // Trigger: the freshest 15M swing break as long as price is still holding
+    // above (bullish) / below (bearish) the pivot it broke. LUX renders its
+    // BOS line for the whole run of bars instead of one candle, so a setup
+    // that is valid at the close stays valid a few bars later; only the
+    // RELAXED pass accepts the shorter internal break on its own.
+    final triggerBull = t15.breakEvent == 'BULLISH' && px > t15.breakLevel;
+    final triggerBear = t15.breakEvent == 'BEARISH' && px < t15.breakLevel;
     final internalBull = t15.internalFresh && t15.internalEvent == 'BULLISH';
     final internalBear = t15.internalFresh && t15.internalEvent == 'BEARISH';
 
@@ -1516,8 +1591,8 @@ class Engine {
     // 30 is a frozen 4H bias with nothing else: still not a trade.
     final threshold = relaxed ? 40.0 : 60.0;
 
-    final bool trigBuy = triggerBull || internalBull;
-    final bool trigSell = triggerBear || internalBear;
+    final bool trigBuy = triggerBull || (relaxed && internalBull);
+    final bool trigSell = triggerBear || (relaxed && internalBear);
 
     if (buy >= threshold && bull4 && !bear4 && trigBuy && buy > sell) {
       double entry = px;
@@ -1546,6 +1621,13 @@ class Engine {
           t15.swingHigh != null && t15.swingHigh!.price > entry * 1.005
           ? t15.swingHigh!.price
           : entry + risk * 2;
+
+      if (t15.breakAge > 2) {
+        bC.add('15M bullish break ${t15.breakAge} bar age');
+      }
+      if (t4.structureConflict) {
+        bC.add('Sotorkota: long-window 4H structure ulto dike');
+      }
 
       return TradeSignal(
         symbol: sym,
@@ -1594,6 +1676,13 @@ class Engine {
       final target = t15.swingLow != null && t15.swingLow!.price < entry * 0.995
           ? t15.swingLow!.price
           : entry - risk * 2;
+
+      if (t15.breakAge > 2) {
+        sC.add('15M bearish break ${t15.breakAge} bar age');
+      }
+      if (t4.structureConflict) {
+        sC.add('Sotorkota: long-window 4H structure ulto dike');
+      }
 
       return TradeSignal(
         symbol: sym,
@@ -1750,8 +1839,14 @@ class Backtester {
       final w4 = _aligned(c4, c15[i].closeTime, window);
       if (w1 == null || w4 == null) continue;
 
-      var sig = Engine.multiTF(symbol, w4, w1, w15);
-      sig ??= Engine.multiTF(symbol, w4, w1, w15, relaxed: true);
+      // The long-window structure check is part of live scoring, so the
+      // simulation must see it too.
+      final l1 = _aligned(c1, c15[i].closeTime, window * 3);
+      final l4 = _aligned(c4, c15[i].closeTime, window * 3);
+
+      var sig = Engine.multiTF(symbol, w4, w1, w15, c4Long: l4, c1Long: l1);
+      sig ??= Engine.multiTF(symbol, w4, w1, w15,
+          c4Long: l4, c1Long: l1, relaxed: true);
       if (sig == null) continue;
 
       // Follow the trade on the 15M series.
@@ -1858,6 +1953,8 @@ class _HS extends State<HomeScreen> {
   int _done = 0;
   int _total = 0;
   int _failed = 0;
+  int _noBias = 0;
+  int _biasNoSetup = 0;
   int _scanId = 0;
   String _feed = '';
   Timer? _timer;
@@ -1889,6 +1986,8 @@ class _HS extends State<HomeScreen> {
         _done = 0;
         _total = 0;
         _failed = 0;
+        _noBias = 0;
+        _biasNoSetup = 0;
       });
     }
 
@@ -1924,19 +2023,40 @@ class _HS extends State<HomeScreen> {
 
           final sym = coins[i].symbol;
           try {
-            final c4 = await MarketData.candles(sym, '4h', 200);
-            final c1 = await MarketData.candles(sym, '1h', 200);
-            final c15 = await MarketData.candles(sym, '15m', 200);
+            // The full history is needed for the long-window structure check;
+            // the engine itself is fed the trailing 200 bars per timeframe.
+            final c4 = await MarketData.candles(sym, '4h', 600);
+            final c1 = await MarketData.candles(sym, '1h', 600);
+            final c15 = await MarketData.candles(sym, '15m', 600);
 
             if (id != _scanId || !mounted) return;
 
+            List<Candle> tail(List<Candle> c, int n) =>
+                c.length <= n ? c : c.sublist(c.length - n);
+
+            final w4 = tail(c4, 200);
+            final w1 = tail(c1, 200);
+            final w15 = tail(c15, 200);
+            final bias = Engine.analyze('4H', w4);
+
             // Strict SMC confluence first; fall back to the relaxed pass so
             // the list is not empty in quiet markets (flagged WATCH).
-            var sig = Engine.multiTF(sym, c4, c1, c15);
-            sig ??= Engine.multiTF(sym, c4, c1, c15, relaxed: true);
+            var sig = Engine.multiTF(sym, w4, w1, w15, c4Long: c4, c1Long: c1);
+            sig ??= Engine.multiTF(sym, w4, w1, w15,
+                c4Long: c4, c1Long: c1, relaxed: true);
             if (mounted) {
               setState(() {
-                if (sig != null) _signals.add(sig);
+                if (sig != null) {
+                  _signals.add(sig);
+                } else {
+                  // Track why a coin was dropped so an empty list can explain
+                  // itself instead of looking like a dead app.
+                  if (bias.trend == 0) {
+                    _noBias++;
+                  } else {
+                    _biasNoSetup++;
+                  }
+                }
               });
             }
           } catch (_) {
@@ -1965,8 +2085,14 @@ class _HS extends State<HomeScreen> {
         _loading = false;
         final strict = _signals.where((s) => !s.watch).length;
         final watch = _signals.length - strict;
+        // An empty list must explain itself: "no 4H trend" and "trend but no
+        // 15M trigger" are completely different problems.
+        final why = _noBias >= _biasNoSetup
+            ? '$_noBias/$_total coin-e 4H trend nei'
+            : '$_biasNoSetup coin-e 4H trend ache, kintu 15M trigger/zone '
+                'mile nai';
         _msg = _signals.isEmpty
-            ? 'Kono setup nei ekhon ($_feed). 5 min por auto refresh hobe.'
+            ? 'Kono setup nei ekhon ($_feed) — $why. 5 min por auto refresh.'
             : '$strict signal • $watch watch ($_feed)'
                 '${_failed > 0 ? ' • $_failed coin skip' : ''}';
       });
