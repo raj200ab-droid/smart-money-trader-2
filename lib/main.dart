@@ -242,26 +242,55 @@ class TradeSignal {
 }
 
 // =====================================================================
-// BINANCE API
+// MARKET DATA  (Binance -> Bybit -> OKX -> MEXC fallback)
 // =====================================================================
 
-class BinanceApi {
-  static const List<String> _urls = <String>[
-    'https://api.binance.com/api/v3',
-    'https://api1.binance.com/api/v3',
-    'https://api2.binance.com/api/v3',
-    'https://api3.binance.com/api/v3',
-    'https://data-api.binance.vision/api/v3',
+/// One exchange endpoint that can supply tickers and candles.
+class _Feed {
+  const _Feed(this.name, this.kind);
+
+  final String name;
+  final String kind; // 'binance' | 'bybit' | 'okx' | 'mexc'
+}
+
+class MarketData {
+  static const List<_Feed> _feeds = <_Feed>[
+    _Feed('Binance', 'binance'),
+    _Feed('Bybit', 'bybit'),
+    _Feed('OKX', 'okx'),
+    _Feed('MEXC', 'mexc'),
   ];
 
-  static int _i = 0;
-  static String get _base => _urls[_i];
+  /// Feed name that produced the last successful scan (shown in the UI).
+  static String activeFeed = '';
 
-  static void _rot() {
-    _i = (_i + 1) % _urls.length;
+  /// Feeds that just failed are skipped for a few minutes so a blocked
+  /// exchange cannot add 15s of timeout to every one of the ~300 requests.
+  static final Map<String, DateTime> _downUntil = <String, DateTime>{};
+
+  static bool _isDown(_Feed f) {
+    final until = _downUntil[f.name];
+    if (until == null) return false;
+    if (DateTime.now().isAfter(until)) {
+      _downUntil.remove(f.name);
+      return false;
+    }
+    return true;
   }
 
-  /// Stablecoins / leveraged tokens that add no signal value.
+  static void _markDown(_Feed f) {
+    _downUntil[f.name] = DateTime.now().add(const Duration(minutes: 3));
+  }
+
+  static void _markUp(_Feed f) {
+    _downUntil.remove(f.name);
+  }
+
+  static const Duration _lag = Duration(
+    milliseconds: 120,
+  );
+
+  /// Stablecoins / fiat / leveraged tokens that add no signal value.
   static const Set<String> _skip = <String>{
     'USDCUSDT',
     'FDUSDUSDT',
@@ -272,54 +301,73 @@ class BinanceApi {
     'EURUSDT',
     'GBPUSDT',
     'AEURUSDT',
+    'USDEUSDT',
+    'PYUSDUSDT',
+    'USD1USDT',
+    'XUSDUSDT',
   };
 
-  /// Leveraged-token suffixes (BTCUPUSDT, ETHDOWNUSDT, ...).
-  static const List<String> _leveraged = <String>[
+  static const List<String> _leveragedSuffixes = <String>[
     'UPUSDT',
     'DOWNUSDT',
     'BULLUSDT',
     'BEARUSDT',
+    '3LUSDT',
+    '3SUSDT',
   ];
+
+  static String baseOf(String symbol) => symbol.replaceAll('USDT', '');
 
   static bool _isTradable(CoinData c) {
     if (!c.symbol.endsWith('USDT')) return false;
+    if (c.symbol == 'USDTUSDT') return false;
     if (_skip.contains(c.symbol)) return false;
-    for (final suffix in _leveraged) {
+    for (final suffix in _leveragedSuffixes) {
       if (c.symbol.endsWith(suffix)) return false;
     }
     if (c.lastPrice <= 0) return false;
     return c.quoteVolume > 5000000; // 5M USDT daily volume
   }
 
-  static Future<List<CoinData>> _tickers() async {
-    for (int a = 0; a < _urls.length; a++) {
-      try {
-        final r = await http
-            .get(Uri.parse('$_base/ticker/24hr'))
-            .timeout(const Duration(seconds: 20));
-        if (r.statusCode == 200) {
-          final data = json.decode(r.body) as List<dynamic>;
-          return data
-              .map((e) => CoinData.fromJson(e as Map<String, dynamic>))
-              .where(_isTradable)
-              .toList();
-        }
-        _rot();
-      } catch (_) {
-        _rot();
-      }
-    }
-    throw Exception('Binance API unreachable');
-  }
-
   /// Top gainers + top losers so both BUY and SELL setups can appear.
+  ///
+  /// Binance is geo-blocked in many regions; if every mirror fails we walk
+  /// the other feeds, because each one exposes the same USDT pairs.
   static Future<List<CoinData>> marketScan({
     int gainers = 60,
     int losers = 40,
   }) async {
-    final all = await _tickers();
-    if (all.isEmpty) return all;
+    final errors = <String>[];
+
+    for (final feed in _feeds) {
+      if (_isDown(feed)) {
+        errors.add('${feed.name}: skipped (recently failed)');
+        continue;
+      }
+      try {
+        final all = await _tickers(feed);
+        final picked = _pick(all, gainers, losers);
+        if (picked.isEmpty) {
+          errors.add('${feed.name}: empty');
+          _markDown(feed);
+          continue;
+        }
+        _markUp(feed);
+        activeFeed = feed.name;
+        return picked;
+      } catch (e) {
+        _markDown(feed);
+        errors.add('${feed.name}: ${_short(e)}');
+      }
+      await Future<void>.delayed(_lag);
+    }
+
+    activeFeed = '';
+    throw MarketDataException(errors.isEmpty ? 'no feed' : errors.join(' | '));
+  }
+
+  static List<CoinData> _pick(List<CoinData> all, int gainers, int losers) {
+    if (all.isEmpty) return <CoinData>[];
 
     final gain = all.where((c) => c.priceChangePercent > 0).toList()
       ..sort((a, b) => b.priceChangePercent.compareTo(a.priceChangePercent));
@@ -342,25 +390,354 @@ class BinanceApi {
     String tf,
     int lim,
   ) async {
-    for (int a = 0; a < _urls.length; a++) {
+    final full = _feedOrder();
+    var order = full.where((f) => !_isDown(f)).toList();
+    if (order.isEmpty) order = full; // everything marked down: try again
+
+    for (final feed in order) {
       try {
-        final r = await http
-            .get(Uri.parse('$_base/klines?symbol=$sym&interval=$tf&limit=$lim'))
-            .timeout(const Duration(seconds: 15));
-        if (r.statusCode == 200) {
-          final list = json.decode(r.body) as List<dynamic>;
-          if (list.isEmpty) throw Exception('empty');
-          return list
-              .map((e) => Candle.fromJson(e as List<dynamic>))
-              .toList();
+        final c = await _candles(feed, sym, tf, lim);
+        if (c.length >= 40) {
+          _markUp(feed);
+          return c;
         }
-        _rot();
+        // Feed answered but has no data for this pair: Binance-only listing.
+        throw MarketDataException('no data');
       } catch (_) {
-        _rot();
+        // A single missing pair must not kill the whole feed; only the
+        // 451 / network style failures make a feed unusable.
+      }
+      await Future<void>.delayed(_lag);
+    }
+    throw MarketDataException('candles $sym');
+  }
+
+  /// Prefer the feed that already worked for the ticker call.
+  static List<_Feed> _feedOrder() {
+    final primary = _feeds.where((f) => f.name == activeFeed);
+    final rest = _feeds.where((f) => f.name != activeFeed);
+    return <_Feed>[...primary, ...rest];
+  }
+
+  static String _short(Object e) {
+    var m = e.toString().replaceAll('\n', ' ');
+    if (m.length > 60) m = m.substring(0, 60);
+    return m;
+  }
+
+  static Future<dynamic> _getJson(String url) async {
+    final r = await http
+        .get(Uri.parse(url), headers: const <String, String>{
+      'Accept': 'application/json',
+    }).timeout(const Duration(seconds: 15));
+    if (r.statusCode == 451) {
+      throw MarketDataException('geo-blocked (451)');
+    }
+    if (r.statusCode != 200) {
+      throw MarketDataException('HTTP ${r.statusCode}');
+    }
+    return json.decode(r.body);
+  }
+
+  // ---------------------------------------------------------------- tickers
+
+  static Future<List<CoinData>> _tickers(_Feed feed) async {
+    switch (feed.kind) {
+      case 'binance':
+        return _binanceTickers();
+      case 'bybit':
+        return _bybitTickers();
+      case 'okx':
+        return _okxTickers();
+      case 'mexc':
+        return _mexcTickers();
+      default:
+        throw MarketDataException('unknown feed');
+    }
+  }
+
+  static const List<String> _binanceMirrors = <String>[
+    'https://api.binance.com/api/v3',
+    'https://api1.binance.com/api/v3',
+    'https://api2.binance.com/api/v3',
+    'https://api3.binance.com/api/v3',
+    'https://data-api.binance.vision/api/v3',
+  ];
+
+  static Future<List<CoinData>> _binanceTickers() async {
+    Object? last;
+    for (final base in _binanceMirrors) {
+      try {
+        final data = await _getJson('$base/ticker/24hr') as List<dynamic>;
+        final list = data
+            .map((e) => CoinData.fromJson(e as Map<String, dynamic>))
+            .where(_isTradable)
+            .toList();
+        if (list.isNotEmpty) return list;
+      } catch (e) {
+        last = e;
       }
     }
-    throw Exception('Candles failed: $sym');
+    throw MarketDataException('binance ${last ?? 'empty'}');
   }
+
+  /// Bybit spot tickers (24h stats).
+  static Future<List<CoinData>> _bybitTickers() async {
+    final resp = await _getJson(
+      'https://api.bybit.com/v5/market/tickers?category=spot',
+    ) as Map<String, dynamic>;
+    final result = resp['result'] as Map<String, dynamic>?;
+    final rows = (result?['list'] as List<dynamic>?) ?? <dynamic>[];
+    final out = <CoinData>[];
+    for (final row in rows) {
+      final m = row as Map<String, dynamic>;
+      final symbol = m['symbol']?.toString() ?? '';
+      if (!symbol.endsWith('USDT')) continue;
+      final price = _d(m['lastPrice']);
+      double pct;
+      if (m['price24hPcnt'] != null) {
+        pct = _d(m['price24hPcnt']) * 100;
+      } else {
+        final prev = _d(m['prevPrice24h']);
+        pct = prev > 0 ? (price - prev) / prev * 100 : 0;
+      }
+      final coin = CoinData(
+        symbol: symbol,
+        lastPrice: price,
+        priceChangePercent: pct,
+        highPrice: _d(m['highPrice24h']),
+        lowPrice: _d(m['lowPrice24h']),
+        quoteVolume: _d(m['turnover24h']),
+      );
+      if (_isTradable(coin)) out.add(coin);
+    }
+    return out;
+  }
+
+  /// OKX spot tickers, symbol format BTC-USDT.
+  static Future<List<CoinData>> _okxTickers() async {
+    final resp = await _getJson(
+      'https://www.okx.com/api/v5/market/tickers?instType=SPOT',
+    ) as Map<String, dynamic>;
+    final rows = (resp['data'] as List<dynamic>?) ?? <dynamic>[];
+    final out = <CoinData>[];
+    for (final row in rows) {
+      final m = row as Map<String, dynamic>;
+      final inst = m['instId']?.toString() ?? '';
+      if (!inst.endsWith('-USDT')) continue;
+      final open = _d(m['open24h']);
+      final px = _d(m['last']);
+      final coin = CoinData(
+        symbol: '${inst.split('-').first}USDT',
+        lastPrice: px,
+        priceChangePercent: open > 0 ? (px - open) / open * 100 : 0,
+        highPrice: _d(m['high24h']),
+        lowPrice: _d(m['low24h']),
+        quoteVolume: _d(m['volCcy24h']),
+      );
+      if (_isTradable(coin)) out.add(coin);
+    }
+    return out;
+  }
+
+  /// MEXC spot tickers.
+  static Future<List<CoinData>> _mexcTickers() async {
+    final data = await _getJson(
+      'https://api.mexc.com/api/v3/ticker/24hr',
+    ) as List<dynamic>;
+    final out = <CoinData>[];
+    for (final row in data) {
+      final m = row as Map<String, dynamic>;
+      final coin = CoinData(
+        symbol: m['symbol']?.toString() ?? '',
+        lastPrice: _d(m['lastPrice']),
+        priceChangePercent: _d(m['priceChangePercent']),
+        highPrice: _d(m['highPrice']),
+        lowPrice: _d(m['lowPrice']),
+        quoteVolume: _d(m['quoteVolume']),
+      );
+      if (_isTradable(coin)) out.add(coin);
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------- candles
+
+  static Future<List<Candle>> _candles(
+    _Feed feed,
+    String sym,
+    String tf,
+    int lim,
+  ) async {
+    switch (feed.kind) {
+      case 'binance':
+        return _binanceCandles(sym, tf, lim);
+      case 'bybit':
+        return _bybitCandles(sym, tf, lim);
+      case 'okx':
+        return _okxCandles(sym, tf, lim);
+      case 'mexc':
+        return _mexcCandles(sym, tf, lim);
+      default:
+        throw MarketDataException('unknown feed');
+    }
+  }
+
+  static Future<List<Candle>> _binanceCandles(
+    String sym,
+    String tf,
+    int lim,
+  ) async {
+    Object? last;
+    for (final base in _binanceMirrors) {
+      try {
+        final data = await _getJson(
+          '$base/klines?symbol=$sym&interval=$tf&limit=$lim',
+        ) as List<dynamic>;
+        final list = data
+            .map((e) => Candle.fromJson(e as List<dynamic>))
+            .toList();
+        if (list.isNotEmpty) return list;
+      } catch (e) {
+        last = e;
+      }
+    }
+    throw MarketDataException('binance ${last ?? 'empty'}');
+  }
+
+  static String _bybitInterval(String tf) {
+    switch (tf) {
+      case '15m':
+        return '15';
+      case '1h':
+        return '60';
+      case '4h':
+        return '240';
+      default:
+        return '60';
+    }
+  }
+
+  static Future<List<Candle>> _bybitCandles(
+    String sym,
+    String tf,
+    int lim,
+  ) async {
+    final resp = await _getJson(
+      'https://api.bybit.com/v5/market/kline'
+      '?category=spot&symbol=$sym&interval=${_bybitInterval(tf)}&limit=$lim',
+    ) as Map<String, dynamic>;
+    final result = resp['result'] as Map<String, dynamic>?;
+    final rows = (result?['list'] as List<dynamic>?) ?? <dynamic>[];
+    if (rows.isEmpty) throw MarketDataException('bybit empty');
+
+    // Bybit returns newest first.
+    final ordered = rows.reversed.toList();
+    return ordered.map((row) {
+      final j = row as List<dynamic>;
+      return Candle(
+        openTime: int.parse(j[0].toString()),
+        closeTime: int.parse(j[0].toString()),
+        open: double.parse(j[1].toString()),
+        high: double.parse(j[2].toString()),
+        low: double.parse(j[3].toString()),
+        close: double.parse(j[4].toString()),
+        volume: double.parse(j[5].toString()),
+      );
+    }).toList();
+  }
+
+  static String _okxBar(String tf) {
+    switch (tf) {
+      case '15m':
+        return '15m';
+      case '1h':
+        return '1H';
+      case '4h':
+        return '4H';
+      default:
+        return '1H';
+    }
+  }
+
+  static Future<List<Candle>> _okxCandles(
+    String sym,
+    String tf,
+    int lim,
+  ) async {
+    final parts = sym.split('USDT');
+    if (parts.length != 2 || parts[1].isNotEmpty) {
+      throw MarketDataException('okx symbol');
+    }
+    final inst = '${parts[0]}-USDT';
+    final data = await _getJson(
+      'https://www.okx.com/api/v5/market/candles'
+      '?instId=$inst&bar=${_okxBar(tf)}&limit=$lim',
+    ) as Map<String, dynamic>;
+    final rows = (data['data'] as List<dynamic>?) ?? <dynamic>[];
+    if (rows.isEmpty) throw MarketDataException('okx empty');
+
+    // OKX returns newest first, and volume in base currency.
+    final ordered = rows.reversed.toList();
+    return ordered.map((row) {
+      final j = row as List<dynamic>;
+      final open = double.parse(j[1].toString());
+      final close = double.parse(j[4].toString());
+      final vol = double.parse(j[5].toString());
+      return Candle(
+        openTime: int.parse(j[0].toString()),
+        closeTime: int.parse(j[0].toString()),
+        open: open,
+        high: double.parse(j[2].toString()),
+        low: double.parse(j[3].toString()),
+        close: close,
+        volume: vol * close, // approx quote volume, keeps spikes comparable
+      );
+    }).toList();
+  }
+
+  static String _mexcInterval(String tf) {
+    switch (tf) {
+      case '15m':
+        return '15m';
+      case '1h':
+        return '60m';
+      case '4h':
+        return '4h';
+      default:
+        return '60m';
+    }
+  }
+
+  static Future<List<Candle>> _mexcCandles(
+    String sym,
+    String tf,
+    int lim,
+  ) async {
+    final data = await _getJson(
+      'https://api.mexc.com/api/v3/klines'
+      '?symbol=$sym&interval=${_mexcInterval(tf)}&limit=$lim',
+    ) as List<dynamic>;
+    final list =
+        data.map((e) => Candle.fromJson(e as List<dynamic>)).toList();
+    if (list.isEmpty) throw MarketDataException('mexc empty');
+    return list;
+  }
+
+  static double _d(dynamic v) {
+    if (v == null) return 0;
+    if (v is num) return v.toDouble();
+    return double.tryParse(v.toString()) ?? 0;
+  }
+}
+
+class MarketDataException implements Exception {
+  MarketDataException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
 }
 
 // =====================================================================
@@ -925,6 +1302,7 @@ class _HS extends State<HomeScreen> {
   int _total = 0;
   int _failed = 0;
   int _scanId = 0;
+  String _feed = '';
   Timer? _timer;
 
   @override
@@ -950,6 +1328,7 @@ class _HS extends State<HomeScreen> {
         _loading = true;
         _signals.clear();
         _msg = 'Top movers khujchi...';
+        _feed = '';
         _done = 0;
         _total = 0;
         _failed = 0;
@@ -957,12 +1336,14 @@ class _HS extends State<HomeScreen> {
     }
 
     try {
-      final coins = await BinanceApi.marketScan(gainers: 60, losers: 40);
+      final coins = await MarketData.marketScan(gainers: 60, losers: 40);
       if (id != _scanId || !mounted) return;
 
       setState(() {
+        _feed = MarketData.activeFeed;
         _total = coins.length;
-        _msg = '${coins.length} coins found. Analyzing...';
+        _msg = '${coins.length} coins found '
+            '(${MarketData.activeFeed}). Analyzing...';
       });
 
       if (coins.isEmpty) {
@@ -986,9 +1367,9 @@ class _HS extends State<HomeScreen> {
 
           final sym = coins[i].symbol;
           try {
-            final c4 = await BinanceApi.candles(sym, '4h', 200);
-            final c1 = await BinanceApi.candles(sym, '1h', 200);
-            final c15 = await BinanceApi.candles(sym, '15m', 200);
+            final c4 = await MarketData.candles(sym, '4h', 200);
+            final c1 = await MarketData.candles(sym, '1h', 200);
+            final c15 = await MarketData.candles(sym, '15m', 200);
 
             if (id != _scanId || !mounted) return;
 
@@ -1023,15 +1404,19 @@ class _HS extends State<HomeScreen> {
         _signals.sort((a, b) => b.confidence.compareTo(a.confidence));
         _loading = false;
         _msg = _signals.isEmpty
-            ? 'Kono valid setup nei ekhon. 5 min por auto refresh hobe.'
-            : '${_signals.length} signal ready'
+            ? 'Kono valid setup nei ekhon ($_feed). 5 min por auto refresh hobe.'
+            : '${_signals.length} signal ready ($_feed)'
                 '${_failed > 0 ? ' • $_failed coin skip' : ''}';
       });
-    } catch (_) {
+    } catch (e) {
       if (!mounted || id != _scanId) return;
+      var detail = e.toString().replaceAll('MarketDataException: ', '');
+      if (detail.length > 120) detail = '${detail.substring(0, 120)}...';
       setState(() {
         _loading = false;
-        _msg = 'Binance API blocked (VPN ba region issue). Retry koro.';
+        _feed = '';
+        _msg = 'Sab exchange block koreche ($detail). '
+            'VPN on koro ba por-e Rescan dao.';
       });
     }
   }

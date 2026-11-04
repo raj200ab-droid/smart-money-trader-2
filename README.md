@@ -38,8 +38,24 @@ flutter build apk --release
 GitHub Actions builds the release APK on every push to `main` and on pull requests
 (`Actions → Build APK → artifacts → smart-money-trader-apk`).
 
+## Data sources
+
+Binance is geo-blocked (HTTP 451) in many regions, VPNs included. The scanner
+therefore walks a feed chain until one answers:
+
+1. **Binance** — `api.binance.com`, `api1..3`, `data-api.binance.vision`
+2. **Bybit** — `api.bybit.com/v5/market`
+3. **OKX** — `www.okx.com/api/v5/market`
+4. **MEXC** — `api.mexc.com/api/v3`
+
+The first feed that returns tickers is reused for that scan's candles; feeds that
+fail are skipped for 3 minutes so a blocked venue cannot add timeouts to every
+request. A pair that only exists on Binance simply yields one skipped coin. The
+feed actually in use is shown next to the progress message (`15 signal ready
+(Bybit)`).
+
 ## Notes
 
-- Binance may be geo-blocked; the app rotates through several API mirrors and
-  shows a retry message if all fail.
+- If every feed is blocked the app says so and keeps the auto-retry timer on.
+- No API keys, no account — public market data only.
 - Technical analysis only — not financial advice.
