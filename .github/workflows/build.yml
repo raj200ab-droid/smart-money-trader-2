@@ -25,27 +25,42 @@ jobs:
           flutter-version: '3.16.0'
           channel: 'stable'
 
-      - name: Create Flutter Project Structure
-        run: flutter create . --org com.smartmoney --project-name smart_money_trader
-
-      - name: Restore Our Files
+      # ===== SAVE our custom files =====
+      - name: Save Custom Files
         run: |
-          cp /dev/null /dev/null
-          # Our pubspec.yaml and main.dart are already in place
+          echo "Saving custom files..."
+          mkdir -p /tmp/backup
+          cp lib/main.dart /tmp/backup/main.dart
+          cp pubspec.yaml /tmp/backup/pubspec.yaml
+          echo "Files saved successfully!"
 
+      # ===== Create Flutter Project (generates android folder etc) =====
+      - name: Create Flutter Project Structure
+        run: flutter create . --org com.smartmoney --project-name smart_money_trader --platforms android
+
+      # ===== RESTORE our custom files (overwrite defaults) =====
+      - name: Restore Custom Files
+        run: |
+          echo "Restoring custom files..."
+          cp /tmp/backup/main.dart lib/main.dart
+          cp /tmp/backup/pubspec.yaml pubspec.yaml
+          echo "Files restored successfully!"
+          echo "--- main.dart head ---"
+          head -5 lib/main.dart
+          echo "--- pubspec.yaml head ---"
+          head -5 pubspec.yaml
+
+      # ===== Build =====
       - name: Install Dependencies
         run: flutter pub get
 
       - name: Build APK
-        run: flutter build apk --release --split-per-abi
-
-      - name: Build Universal APK
         run: flutter build apk --release
 
-      - name: Upload APK (Universal)
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: smart-money-trader-universal
+          name: smart-money-trader-apk
           path: build/app/outputs/flutter-apk/app-release.apk
 
       - name: Upload APK (Arm64)
@@ -53,15 +68,11 @@ jobs:
         with:
           name: smart-money-trader-arm64
           path: build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+        continue-on-error: true
 
-      - name: Upload APK (Armv7)
+      - name: Upload APK (ArmV7)
         uses: actions/upload-artifact@v4
         with:
           name: smart-money-trader-armv7
           path: build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
-
-      - name: Upload APK (x86_64)
-        uses: actions/upload-artifact@v4
-        with:
-          name: smart-money-trader-x86_64
-          path: build/app/outputs/flutter-apk/app-x86_64-release.apk
+        continue-on-error: true
