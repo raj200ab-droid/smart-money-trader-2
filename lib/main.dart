@@ -2047,7 +2047,7 @@ class Backtester {
   }) {
     final trades = <BacktestTrade>[];
     final n = c15.length;
-    final start = window4h ~/ 4 > window ? window4h ~/ 4 : window;
+    final start = window;
     if (n <= start + 5) {
       return BacktestResult(
         symbol: symbol,
@@ -2069,7 +2069,12 @@ class Backtester {
 
       final w15 = c15.sublist(i - window, i + 1);
       final w1 = _aligned(c1, c15[i].closeTime, window);
-      final w4 = _aligned(c4, c15[i].closeTime, window4h);
+      // A recently listed coin may not have 400 closed 4H bars behind this
+      // timestamp; fall back to a shorter bias window instead of silently
+      // producing zero trades.
+      final w4 = _aligned(c4, c15[i].closeTime, window4h) ??
+          _aligned(c4, c15[i].closeTime, 200) ??
+          _aligned(c4, c15[i].closeTime, 120);
       if (w1 == null || w4 == null) continue;
 
       // The long-window structure check is part of live scoring, so the
@@ -3119,7 +3124,7 @@ class _BTS extends State<BacktestScreen> {
     try {
       // ~40 days of 15M bars. 1000 bars was only ten days, which produced a
       // handful of trades — too few to say anything about an edge.
-      final c4 = await MarketData.candles(symbol, '4h', 500);
+      final c4 = await MarketData.candles(symbol, '4h', 900);
       final c1 = await MarketData.candles(symbol, '1h', 1200);
       final c15 = await MarketData.candles(symbol, '15m', 4000);
       if (!mounted) return;
