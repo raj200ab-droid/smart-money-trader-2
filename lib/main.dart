@@ -1941,6 +1941,10 @@ class BacktestResult {
 
   int get total => trades.length;
   int get closed => trades.where((t) => t.outcome != 'OPEN').length;
+
+  /// Trades still running at the end of the sample. They carry no information
+  /// about the edge and must never be folded into the win rate.
+  int get open => trades.where((t) => t.outcome == 'OPEN').length;
   int get wins => trades.where((t) => t.outcome == 'TP').length;
   int get losses => trades.where((t) => t.outcome == 'SL').length;
 
@@ -1986,20 +1990,23 @@ class Backtester {
   /// 4H bars fed to the bias check (deeper than 1H/15M, see the scanner).
   static const int window4h = 400;
 
-  /// Runs the engine over [bars], stepping forward one bar per signal check.
-  /// A trade is only opened when no earlier trade is still open, which keeps
-  /// the statistics honest (no overlapping copies of the same move).
+  /// Walks forward from the first bar that has enough history, asking the
+  /// engine for a signal at every bar. A trade is only opened when no earlier
+  /// trade is still open, which keeps the statistics honest (no overlapping
+  /// copies of the same move). Trades that never resolved are kept and
+  /// reported separately instead of being hidden inside a win rate.
   static BacktestResult run(
     String symbol,
     List<Candle> c4,
     List<Candle> c1,
     List<Candle> c15, {
     int step = 1,
-    int maxTrades = 60,
+    int maxTrades = 200,
   }) {
     final trades = <BacktestTrade>[];
     final n = c15.length;
-    if (n < window + 20) {
+    final start = window4h ~/ 4 > window ? window4h ~/ 4 : window;
+    if (n <= start + 5) {
       return BacktestResult(
         symbol: symbol,
         trades: trades,
@@ -2012,9 +2019,9 @@ class Backtester {
     }
 
     int openUntil = -1;
-    int lastSignalBar = -window;
+    int lastSignalBar = -start;
 
-    for (int i = window; i < n - 1; i += step) {
+    for (int i = start; i < n - 1; i += step) {
       if (i <= openUntil) continue; // still in a trade
       if (i - lastSignalBar < 2) continue; // do not spam the same move
 
@@ -2026,39 +2033,36 @@ class Backtester {
       // The long-window structure check is part of live scoring, so the
       // simulation must see it too.
       final l1 = _aligned(c1, c15[i].closeTime, window * 3);
-      final l4 = _aligned(c4, c15[i].closeTime, window * 3);
+      final l4 = _aligned(c4, c15[i].closeTime, window4h * 2);
 
       var sig = Engine.multiTF(symbol, w4, w1, w15, c4Long: l4, c1Long: l1);
       sig ??= Engine.multiTF(symbol, w4, w1, w15,
           c4Long: l4, c1Long: l1, relaxed: true);
       if (sig == null) continue;
 
-      // Follow the trade on the 15M series.
+      // Follow the trade on the 15M series until its stop or target.
       String outcome = 'OPEN';
       double rMult = 0;
+      int exitBar = n - 1;
       for (int j = i + 1; j < n; j++) {
         final bar = c15[j];
         final hitSl = sig.isBuy ? bar.low <= sig.sl : bar.high >= sig.sl;
         final hitTp = sig.isBuy ? bar.high >= sig.tp : bar.low <= sig.tp;
-        if (hitSl && hitTp) {
-          outcome = 'SL'; // ambiguous bar: assume the worst
-          rMult = -1;
-          openUntil = j;
-          break;
-        }
         if (hitSl) {
+          // A bar that touches both is counted as a loss.
           outcome = 'SL';
           rMult = -1;
-          openUntil = j;
+          exitBar = j;
           break;
         }
         if (hitTp) {
           outcome = 'TP';
           rMult = (sig.tp - sig.entry).abs() / (sig.sl - sig.entry).abs();
-          openUntil = j;
+          exitBar = j;
           break;
         }
       }
+      openUntil = exitBar;
 
       trades.add(BacktestTrade(
         symbol: symbol,
@@ -2076,7 +2080,7 @@ class Backtester {
       if (trades.length >= maxTrades) break;
     }
 
-    final first = c15.length > window ? c15[window] : c15.first;
+    final first = c15[start];
     return BacktestResult(
       symbol: symbol,
       trades: trades,
@@ -3086,8 +3090,8 @@ class _BTS extends State<BacktestScreen> {
         _running = false;
         _msg = result.trades.isEmpty
             ? 'Ei coin e kono setup nei ekhon ($symbol). Onno coin try koro.'
-            : '${result.total} trade • win rate '
-                '${result.winRate.toStringAsFixed(0)}%';
+            : '${result.closed} nishpotti trade (${result.open} open) • '
+                'total R ${result.totalR.toStringAsFixed(2)}';
       });
     } catch (e) {
       if (!mounted) return;
@@ -3184,7 +3188,23 @@ class _BTS extends State<BacktestScreen> {
     final good = r.totalR >= 0;
     return <Widget>[
       _statCard('Win rate', '${r.winRate.toStringAsFixed(1)}%',
-          r.winRate >= 50 ? K.green : K.orange),
+          r.closed < 20 ? K.muted : (r.winRate >= 50 ? K.green : K.orange)),
+      const SizedBox(height: 6),
+      Text(
+        r.closed < 20
+            ? 'Sample choto: matro ${r.closed} ta trade nishpotti hoyeche '
+                '(${r.open} ta OPEN). Eta diye strategy judge kora jabe na.'
+            : r.totalR > 0
+                ? '${r.closed} ta nishpotti trade, total ${r.totalR.toStringAsFixed(2)}R '
+                    '— positive expectation.'
+                : '${r.closed} ta nishpotti trade, total ${r.totalR.toStringAsFixed(2)}R '
+                    '— ei sample e labh nei.',
+        style: TextStyle(
+          color: r.closed < 20 ? K.orange : (r.totalR > 0 ? K.green : K.red),
+          fontSize: 11,
+          height: 1.4,
+        ),
+      ),
       const SizedBox(height: 10),
       Row(
         children: <Widget>[
@@ -3192,7 +3212,11 @@ class _BTS extends State<BacktestScreen> {
             child: _miniStat('Trades', '$n', K.text),
           ),
           const SizedBox(width: 8),
-          Expanded(child: _miniStat('Win / Loss', '${r.wins} / ${r.losses}', K.text)),
+          Expanded(
+            child: _miniStat(
+                'Win / Loss', '${r.wins} / ${r.losses}', K.text,
+                sub: r.open > 0 ? '+${r.open} open' : null),
+          ),
           const SizedBox(width: 8),
           Expanded(
             child: _miniStat(
@@ -3253,8 +3277,10 @@ class _BTS extends State<BacktestScreen> {
             ),
             const SizedBox(height: 4),
             Text(
-              'Win rate ${r.winRate.toStringAsFixed(0)}% mane protiti 3 trade e '
-              '2 tar target hobe. R positive hole strategy labh e ache.',
+              'Win rate ${r.winRate.toStringAsFixed(0)}% mane ${r.closed} ta '
+              'nishpotti trade er ${r.wins} ta TP hit koreche. '
+              'Total R ${r.totalR.toStringAsFixed(2)} — win rate na, ei '
+              'number ta dekh.',
               style: const TextStyle(color: K.muted, fontSize: 11, height: 1.4),
             ),
           ],
@@ -3348,7 +3374,7 @@ class _BTS extends State<BacktestScreen> {
     );
   }
 
-  Widget _miniStat(String label, String value, Color color) {
+  Widget _miniStat(String label, String value, Color color, {String? sub}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
       decoration: BoxDecoration(
@@ -3368,6 +3394,9 @@ class _BTS extends State<BacktestScreen> {
                 style: TextStyle(
                     color: color, fontSize: 14, fontWeight: FontWeight.bold)),
           ),
+          if (sub != null)
+            Text(sub,
+                style: const TextStyle(color: K.muted, fontSize: 9)),
         ],
       ),
     );
