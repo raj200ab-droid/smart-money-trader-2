@@ -53,8 +53,6 @@ Below the empty state a **"kache kache eshechilo"** list shows each coin's
 diagnosis and its score against the threshold, which is the data needed to
 tune the filters instead of guessing.
 
-If they are using `.vscode` or another editor on Windows/Mac they may need to configure the Flutter SDK path.
-
 ## Backtest
 
 The chart icon in the app bar opens a backtest screen: type a coin, hit **Run**,
