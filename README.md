@@ -88,6 +88,12 @@ followed to its stop or target and the screen reports:
 - win rate for STRICT-only signals (higher quality subset)
 - current win/loss streak and the full trade list
 
+The screen refuses to be optimistic: with fewer than 20 decided trades it says
+so explicitly, and trades still running are reported as `open` rather than
+being folded into the win rate. The backtest pulls ~40 days of 15M history by
+paging Binance klines (1000 rows per request) and degrades the 4H bias window
+from 400 to 200 to 120 bars when a listing is younger than that.
+
 Read the **total R**, not the win rate: at 2R targets a 40% win rate is
 profitable, while a 60% win rate at 1R can still lose. A sample of a few dozen
 trades is directional evidence, not proof.
