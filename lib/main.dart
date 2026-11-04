@@ -521,6 +521,14 @@ class MarketData {
     String tf,
     int lim,
   ) async {
+    // Deep history: Binance can page it, the other feeds cannot.
+    if (lim > 1000) {
+      try {
+        final deep = await _binancePaged(sym, tf, lim);
+        if (deep.length >= 400) return deep;
+      } catch (_) {}
+    }
+
     final full = _feedOrder();
     var order = full.where((f) => !_isDown(f)).toList();
     if (order.isEmpty) order = full; // everything marked down: try again
@@ -744,6 +752,40 @@ class MarketData {
       }
     }
     throw MarketDataException('binance ${last ?? 'empty'}');
+  }
+
+  /// Binance caps klines at 1000 rows per request, so anything longer is
+  /// stitched together from several pages walking backwards in time.
+  /// Used by the backtest, where a 1000-bar sample is only ten days.
+  static Future<List<Candle>> _binancePaged(
+    String sym,
+    String tf,
+    int lim,
+  ) async {
+    Object? last;
+    for (final base in _binanceMirrors) {
+      try {
+        final out = <Candle>[];
+        int? endTime;
+        while (out.length < lim) {
+          final page = lim - out.length > 1000 ? 1000 : lim - out.length;
+          final url = '$base/klines?symbol=$sym&interval=$tf&limit=$page'
+              '${endTime == null ? '' : '&endTime=$endTime'}';
+          final data = await _getJson(url) as List<dynamic>;
+          if (data.isEmpty) break;
+          final batch =
+              data.map((e) => Candle.fromJson(e as List<dynamic>)).toList();
+          out.insertAll(0, batch);
+          endTime = batch.first.openTime - 1;
+          if (batch.length < page) break; // start of the listing
+          await Future<void>.delayed(_lag);
+        }
+        if (out.isNotEmpty) return out;
+      } catch (e) {
+        last = e;
+      }
+    }
+    throw MarketDataException('binance paged ${last ?? 'empty'}');
   }
 
   static String _bybitInterval(String tf) {
@@ -3075,9 +3117,11 @@ class _BTS extends State<BacktestScreen> {
     });
 
     try {
-      final c4 = await MarketData.candles(symbol, '4h', 1000);
-      final c1 = await MarketData.candles(symbol, '1h', 1000);
-      final c15 = await MarketData.candles(symbol, '15m', 1000);
+      // ~40 days of 15M bars. 1000 bars was only ten days, which produced a
+      // handful of trades — too few to say anything about an edge.
+      final c4 = await MarketData.candles(symbol, '4h', 500);
+      final c1 = await MarketData.candles(symbol, '1h', 1200);
+      final c15 = await MarketData.candles(symbol, '15m', 4000);
       if (!mounted) return;
 
       setState(() => _msg = 'Simulating ${c15.length} bars...');
