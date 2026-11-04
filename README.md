@@ -39,6 +39,22 @@ Signals fire in two passes: a **STRICT** pass (4H bias + 1H OB/FVG zone +
 pass with a lower threshold and no counter-trend gate. Watch signals are marked
 `WATCH` in the list.
 
+## Why the list can be empty
+
+The scanner reports *why* it found nothing. The status line tells you which of
+the two failure modes dominates across the 73 scanned coins:
+
+- `N/73 coin-e 4H trend nei` — the higher timeframe has no confirmed structure
+  break, so nothing is tradable by design
+- `N coin-e 4H trend ache, kintu 15M trigger/zone mile nai` — bias exists but
+  the 1H OB/FVG or the 15M trigger is missing
+
+Below the empty state a **"kache kache eshechilo"** list shows each coin's
+diagnosis and its score against the threshold, which is the data needed to
+tune the filters instead of guessing.
+
+If they are using `.vscode` or another editor on Windows/Mac they may need to configure the Flutter SDK path.
+
 ## Backtest
 
 The chart icon in the app bar opens a backtest screen: type a coin, hit **Run**,
