@@ -140,3 +140,8 @@ feed actually in use is shown next to the progress message (`15 signal ready
 - If every feed is blocked the app says so and keeps the auto-retry timer on.
 - No API keys, no account — public market data only.
 - Technical analysis only — not financial advice.
+
+## Project memory
+
+Every decision, the reasons behind it, and the list of open items live in
+[`NOTES.md`](NOTES.md). Read that before changing engine behaviour.
