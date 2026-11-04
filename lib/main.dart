@@ -165,6 +165,21 @@ class SwingPoint {
   final String type; // 'high' | 'low'
 }
 
+/// One confirmed structure break (BOS / CHoCH) at [bar].
+class StructureBreak {
+  StructureBreak({
+    required this.event,
+    required this.bar,
+    required this.pivot,
+    required this.pattern,
+  });
+
+  final String event; // 'BULLISH' | 'BEARISH'
+  final int bar;
+  final SwingPoint pivot;
+  final String pattern; // 'BOS' | 'CHoCH'
+}
+
 class TFAnalysis {
   TFAnalysis({
     required this.timeframe,
@@ -181,6 +196,20 @@ class TFAnalysis {
     required this.candles,
     required this.close,
     required this.atr,
+    required this.trend,
+    required this.choch,
+    required this.swingHigh,
+    required this.swingLow,
+    required this.premium,
+    required this.equilibrium,
+    required this.discount,
+    required this.eqh,
+    required this.eql,
+    required this.freshBreak,
+    required this.breakPattern,
+    required this.breakEvent,
+    required this.internalFresh,
+    required this.internalEvent,
   });
 
   final String timeframe;
@@ -197,6 +226,41 @@ class TFAnalysis {
   final List<Candle> candles;
   final double close;
   final double atr;
+
+  /// 1 = bullish, -1 = bearish, 0 = unknown. Swing (not internal) trend.
+  final int trend;
+  final bool choch;
+
+  /// Most recent confirmed swing high / low and its bar index.
+  final SwingPoint? swingHigh;
+  final SwingPoint? swingLow;
+
+  /// Premium / equilibrium / discount bounds of the current swing range.
+  final double premium;
+  final double equilibrium;
+  final double discount;
+
+  /// Equal highs / equal lows (liquidity pools) with their price.
+  final bool eqh;
+  final bool eql;
+
+  /// Break of structure happened within the last two bars.
+  final bool freshBreak;
+  final String breakPattern; // 'BOS' | 'CHoCH' | ''
+  final String breakEvent; // 'BULLISH' | 'BEARISH' | ''
+
+  /// Same, for the 5-bar internal structure.
+  final bool internalFresh;
+  final String internalEvent;
+
+  String get zoneOf {
+    if (premium <= 0) return 'Unknown';
+    if (swingHigh != null && close > swingHigh!.price) return 'Breakout';
+    if (swingLow != null && close < swingLow!.price) return 'Breakdown';
+    if (close > premium) return 'Premium';
+    if (close < discount) return 'Discount';
+    return 'Equilibrium';
+  }
 }
 
 class TradeSignal {
@@ -213,6 +277,15 @@ class TradeSignal {
     required this.tf4h,
     required this.tf1h,
     required this.tf15m,
+    required this.pattern,
+    required this.zone,
+    required this.eqh,
+    required this.eql,
+    required this.freshBreak,
+    required this.breakPattern,
+    required this.breakEvent,
+    required this.internalFresh,
+    required this.internalEvent,
   });
 
   final String symbol;
@@ -227,6 +300,19 @@ class TradeSignal {
   final String tf4h;
   final String tf1h;
   final String tf15m;
+
+  /// 'BOS' or 'CHoCH' — CHoCH is a reversal, BOS is a continuation.
+  final String pattern;
+
+  /// Where price sat inside the swing range when the signal fired.
+  final String zone;
+
+  /// Liquidity pools the engine saw (equal highs / equal lows).
+  final bool eqh;
+  final bool eql;
+
+  /// True when only the relaxed (lower-conviction) pass produced this signal.
+  final bool watch;
 
   bool get isBuy => direction == 'BUY';
 
@@ -772,194 +858,83 @@ class MarketDataException implements Exception {
 
 // =====================================================================
 // SMART MONEY ENGINE
+//
+// Port of the LuxAlgo "Smart Money Concepts" model (CC BY-NC-SA 4.0,
+// https://www.tradingview.com/script/  — LuxAlgo) reimplemented from its
+// published logic: pivot state machine (swing length 50, internal 5),
+// BOS vs CHoCH, structure-interval order blocks, auto-threshold FVGs,
+// EQH/EQL liquidity and premium/discount/equilibrium zones.
 // =====================================================================
 
 class Engine {
-  /// Pivot highs / lows with [lb] candles on each side.
-  static List<SwingPoint> swings(List<Candle> c, {int lb = 5}) {
-    final pts = <SwingPoint>[];
-    if (c.length < lb * 2 + 1) return pts;
-    for (int i = lb; i < c.length - lb; i++) {
-      bool isHigh = true;
-      bool isLow = true;
-      for (int j = i - lb; j <= i + lb; j++) {
-        if (j == i) continue;
-        if (c[j].high >= c[i].high) isHigh = false;
-        if (c[j].low <= c[i].low) isLow = false;
+  /// Swing structure length used by LUX.
+  static const int swingLen = 50;
+
+  /// Internal structure length used by LUX.
+  static const int internalLen = 5;
+
+  /// A pivot high/low plus the trending direction it was confirmed in.
+  static List<SwingPoint> swings(List<Candle> c, {int len = swingLen}) {
+    final points = <SwingPoint>[];
+    if (c.length < len + 2) return points;
+
+    // LUX oscillator: 0 while price stays below the trailing high, 1 while it
+    // stays above the trailing low. The state flip confirms the pivot that
+    // happened `len` bars earlier.
+    var os = 0;
+    for (int n = 1; n < c.length; n++) {
+      double upper = double.negativeInfinity;
+      double lower = double.infinity;
+      for (int i = n - len; i < n; i++) {
+        if (i < 0) continue;
+        if (c[i].high > upper) upper = c[i].high;
+        if (c[i].low < lower) lower = c[i].low;
       }
-      if (isHigh) pts.add(SwingPoint(price: c[i].high, index: i, type: 'high'));
-      if (isLow) pts.add(SwingPoint(price: c[i].low, index: i, type: 'low'));
-    }
-    return pts;
-  }
+      // Window incomplete or degenerate: keep the previous state.
+      if (upper == double.negativeInfinity || lower == double.infinity) {
+        continue;
+      }
 
-  /// HH+HL => BULLISH, LH+LL => BEARISH.
-  static String structure(List<SwingPoint> p) {
-    final h = p.where((x) => x.type == 'high').toList();
-    final l = p.where((x) => x.type == 'low').toList();
-    if (h.length < 2 || l.length < 2) return 'NEUTRAL';
-
-    final higherHigh = h[h.length - 1].price > h[h.length - 2].price;
-    final higherLow = l[l.length - 1].price > l[l.length - 2].price;
-    final lowerHigh = h[h.length - 1].price < h[h.length - 2].price;
-    final lowerLow = l[l.length - 1].price < l[l.length - 2].price;
-
-    if (higherHigh && higherLow) return 'BULLISH';
-    if (lowerHigh && lowerLow) return 'BEARISH';
-    return 'NEUTRAL';
-  }
-
-  /// Break of structure measured against the last *confirmed* swing.
-  static String? bos(List<Candle> c, List<SwingPoint> p, {int lb = 5}) {
-    if (c.length < 3 || p.isEmpty) return null;
-    final cutoff = c.length - lb - 1;
-    final px = c.last.close;
-
-    final highs =
-        p.where((x) => x.type == 'high' && x.index <= cutoff).toList();
-    final lows = p.where((x) => x.type == 'low' && x.index <= cutoff).toList();
-
-    if (highs.isNotEmpty && px > highs.last.price) return 'BULLISH_BOS';
-    if (lows.isNotEmpty && px < lows.last.price) return 'BEARISH_BOS';
-    return null;
-  }
-
-  /// Displacement order blocks that have not been mitigated yet.
-  static List<OrderBlock> obs(List<Candle> c) {
-    final res = <OrderBlock>[];
-    if (c.length < 20) return res;
-
-    int start = c.length - 30;
-    if (start < 0) start = 0;
-    double sum = 0;
-    int n = 0;
-    for (int i = start; i < c.length; i++) {
-      sum += c[i].bodySize;
-      n++;
-    }
-    final avg = n > 0 ? sum / n : 0.0;
-    if (avg <= 0) return res;
-
-    int from = c.length - 80;
-    if (from < 1) from = 1;
-
-    for (int i = from; i < c.length - 1; i++) {
-      final cur = c[i];
-      final nxt = c[i + 1];
-
-      if (cur.isBearish && nxt.isBullish && nxt.bodySize > avg * 1.4) {
-        bool valid = true;
-        for (int j = i + 2; j < c.length; j++) {
-          if (c[j].close < cur.low) {
-            valid = false;
-            break;
-          }
-        }
-        if (valid) {
-          res.add(OrderBlock(
-              high: cur.high, low: cur.low, type: 'bullish', index: i));
+      final int prev = os;
+      if (n - len >= 0) {
+        if (c[n - len].high > upper) {
+          os = 0;
+        } else if (c[n - len].low < lower) {
+          os = 1;
         }
       }
 
-      if (cur.isBullish && nxt.isBearish && nxt.bodySize > avg * 1.4) {
-        bool valid = true;
-        for (int j = i + 2; j < c.length; j++) {
-          if (c[j].close > cur.high) {
-            valid = false;
-            break;
-          }
-        }
-        if (valid) {
-          res.add(OrderBlock(
-              high: cur.high, low: cur.low, type: 'bearish', index: i));
-        }
+      if (os == 0 && prev != 0) {
+        points.add(SwingPoint(
+          price: c[n - len].high,
+          index: n - len,
+          type: 'high',
+        ));
+      }
+      if (os == 1 && prev != 1) {
+        points.add(SwingPoint(
+          price: c[n - len].low,
+          index: n - len,
+          type: 'low',
+        ));
       }
     }
-    return res;
+    return points;
   }
 
-  /// Unfilled fair value gaps.
-  static List<FVG> fvgs(List<Candle> c) {
-    final res = <FVG>[];
-    if (c.length < 4) return res;
-
-    int from = c.length - 80;
-    if (from < 1) from = 1;
-
-    for (int i = from; i < c.length - 1; i++) {
-      final prev = c[i - 1];
-      final next = c[i + 1];
-
-      if (prev.high < next.low) {
-        bool filled = false;
-        for (int j = i + 2; j < c.length; j++) {
-          if (c[j].low <= prev.high) {
-            filled = true;
-            break;
-          }
-        }
-        if (!filled) {
-          res.add(FVG(
-              high: next.low, low: prev.high, type: 'bullish', index: i));
-        }
-      }
-
-      if (prev.low > next.high) {
-        bool filled = false;
-        for (int j = i + 2; j < c.length; j++) {
-          if (c[j].high >= prev.low) {
-            filled = true;
-            break;
-          }
-        }
-        if (!filled) {
-          res.add(FVG(
-              high: prev.low, low: next.high, type: 'bearish', index: i));
-        }
-      }
-    }
-    return res;
+  /// LUX compares against the last pivot of each side (the pivot becomes the
+  /// new reference once price breaks it, and a newer pivot replaces it).
+  static SwingPoint? _lastUnbrokenHigh(List<SwingPoint> pts) {
+    final list = pts.where((p) => p.type == 'high').toList();
+    return list.isEmpty ? null : list.last;
   }
 
-  /// Liquidity sweep inside the last 3 candles.
-  static String? sweep(List<Candle> c, List<SwingPoint> p, {int lb = 5}) {
-    if (c.length < lb * 2 + 2) return null;
-    final cutoff = c.length - lb - 1;
-
-    final highs =
-        p.where((x) => x.type == 'high' && x.index <= cutoff).toList();
-    final lows = p.where((x) => x.type == 'low' && x.index <= cutoff).toList();
-
-    int from = c.length - 3;
-    if (from < 0) from = 0;
-
-    for (int i = from; i < c.length; i++) {
-      if (lows.isNotEmpty &&
-          c[i].low < lows.last.price &&
-          c[i].close > lows.last.price) {
-        return 'BULLISH_SWEEP';
-      }
-      if (highs.isNotEmpty &&
-          c[i].high > highs.last.price &&
-          c[i].close < highs.last.price) {
-        return 'BEARISH_SWEEP';
-      }
-    }
-    return null;
+  static SwingPoint? _lastUnbrokenLow(List<SwingPoint> pts) {
+    final list = pts.where((p) => p.type == 'low').toList();
+    return list.isEmpty ? null : list.last;
   }
 
-  static bool volSpike(List<Candle> c) {
-    if (c.length < 21) return false;
-    double avg = 0;
-    for (int i = c.length - 20; i < c.length - 1; i++) {
-      avg += c[i].volume;
-    }
-    avg /= 19;
-    if (avg <= 0) return false;
-    return c.last.volume > avg * 1.5;
-  }
-
-  /// Average true range, used for stop buffers.
+  /// Average true range; LUX uses ATR(200) for its thresholds.
   static double atr(List<Candle> c, {int period = 14}) {
     if (c.length < 2) return 0;
     int n = period;
@@ -976,172 +951,451 @@ class Engine {
     return sum / n;
   }
 
+  /// Order block from the structure interval (LUX `ob_coord`).
+  ///
+  /// Bullish: walk back from the break to the pivot and take the highest
+  /// candle whose range is under 2x ATR. Bearish: mirror with the lowest.
+  static OrderBlock? _structureOb(
+    List<Candle> c,
+    int fromIndex,
+    bool bullish,
+    double atrValue,
+  ) {
+    double? best;
+    double? other;
+    int bestIndex = fromIndex;
+
+    for (int i = c.length - 1; i > fromIndex; i--) {
+      final range = c[i].high - c[i].low;
+      if (range >= atrValue * 2) continue;
+      if (bullish) {
+        if (best == null || c[i].high > best) {
+          best = c[i].high;
+          other = c[i].low;
+          bestIndex = i;
+        }
+      } else {
+        if (best == null || c[i].low < best) {
+          best = c[i].low;
+          other = c[i].high;
+          bestIndex = i;
+        }
+      }
+    }
+    if (best == null || other == null) return null;
+    return OrderBlock(
+      high: bullish ? best : max(best, other),
+      low: bullish ? min(best, other) : best,
+      type: bullish ? 'bullish' : 'bearish',
+      index: bestIndex,
+    );
+  }
+
+  /// Order blocks that price has not closed through yet (LUX mitigation).
+  static List<OrderBlock> activeObs(List<OrderBlock> obs, List<Candle> c) {
+    final out = <OrderBlock>[];
+    for (final o in obs) {
+      bool broken = false;
+      for (int i = o.index + 1; i < c.length; i++) {
+        if (o.type == 'bearish' && c[i].close < o.low) {
+          broken = true;
+          break;
+        }
+        if (o.type == 'bullish' && c[i].close > o.high) {
+          broken = true;
+          break;
+        }
+      }
+      if (!broken) out.add(o);
+    }
+    return out;
+  }
+
+  /// LUX fair value gaps: `low > high[2] && close > high[2]` for bullish,
+  /// mirrored for bearish, filtered by the running-mean delta threshold.
+  /// Returns the active (unfilled) gaps.
+  static List<FVG> fvgs(List<Candle> c) {
+    final raw = <FVG>[];
+    final deltas = <double>[];
+    if (c.length < 4) return raw;
+
+    for (int i = 2; i < c.length; i++) {
+      final prev2 = c[i - 2];
+      final prev1 = c[i - 1];
+      final cur = c[i];
+      final deltaPer =
+          prev1.open > 0 ? (prev1.close - prev1.open) / prev1.open * 100 : 0.0;
+      deltas.add(deltaPer.abs());
+
+      // Running mean of |delta| * 2, as LUX computes ta.cum(...)/n*2.
+      final threshold = deltas.reduce((a, b) => a + b) / deltas.length * 2;
+
+      if (cur.low > prev2.high &&
+          prev1.close > prev2.high &&
+          deltaPer > threshold) {
+        raw.add(FVG(high: cur.low, low: prev2.high, type: 'bullish', index: i));
+      }
+      if (cur.high < prev2.low &&
+          prev1.close < prev2.low &&
+          -deltaPer > threshold) {
+        raw.add(
+            FVG(high: prev2.low, low: cur.high, type: 'bearish', index: i));
+      }
+    }
+
+    // LUX deletes a bullish gap when a later low trades under its bottom and
+    // a bearish gap when a later high trades over its top.
+    final active = <FVG>[];
+    for (final f in raw) {
+      bool filled = false;
+      for (int i = f.index + 1; i < c.length; i++) {
+        if (f.type == 'bullish' && c[i].low < f.low) filled = true;
+        if (f.type == 'bearish' && c[i].high > f.high) filled = true;
+        if (filled) break;
+      }
+      if (!filled) active.add(f);
+    }
+    return active;
+  }
+
+  /// A structure break: direction, the bar it closed on, the pivot it broke
+  /// and the pattern (BOS = continuation, CHoCH = against the prior trend).
+  static List<StructureBreak> breaks(
+    List<Candle> c,
+    List<SwingPoint> pts, {
+    int len = swingLen,
+    int barsBack = 30,
+  }) {
+    final out = <StructureBreak>[];
+    if (c.length < 3) return out;
+
+    final highs = pts.where((p) => p.type == 'high').toList();
+    final lows = pts.where((p) => p.type == 'low').toList();
+
+    int from = c.length - barsBack;
+    if (from < 1) from = 1;
+
+    // A pivot is usable only once it is confirmed `len` bars later, and every
+    // newly confirmed pivot re-arms the break detection for that side.
+    SwingPoint? curHigh;
+    SwingPoint? curLow;
+    bool highBroken = false;
+    bool lowBroken = false;
+
+    for (int k = from; k < c.length; k++) {
+      for (final p in highs) {
+        if (p.index + len <= k && (curHigh == null || p.index > curHigh.index)) {
+          curHigh = p;
+          highBroken = false;
+        }
+      }
+      for (final p in lows) {
+        if (p.index + len <= k && (curLow == null || p.index > curLow.index)) {
+          curLow = p;
+          lowBroken = false;
+        }
+      }
+
+      final px = c[k].close;
+      final prev = c[k - 1].close;
+
+      if (curHigh != null &&
+          !highBroken &&
+          prev <= curHigh.price &&
+          px > curHigh.price) {
+        highBroken = true;
+        out.add(StructureBreak(
+          event: 'BULLISH',
+          bar: k,
+          pivot: curHigh,
+          pattern: _pattern(pts, curHigh.index, true),
+        ));
+      }
+
+      if (curLow != null &&
+          !lowBroken &&
+          prev >= curLow.price &&
+          px < curLow.price) {
+        lowBroken = true;
+        out.add(StructureBreak(
+          event: 'BEARISH',
+          bar: k,
+          pivot: curLow,
+          pattern: _pattern(pts, curLow.index, false),
+        ));
+      }
+    }
+    return out;
+  }
+
+  /// CHoCH when the break goes against the structure that preceded the pivot.
+  static String _pattern(List<SwingPoint> pts, int pivotIndex, bool bullish) {
+    final before = pts.where((p) => p.index < pivotIndex).toList();
+    final trend = trendOf(before);
+    if (bullish && trend < 0) return 'CHoCH';
+    if (!bullish && trend > 0) return 'CHoCH';
+    return 'BOS';
+  }
+
+  /// Trend from the last two swing highs and lows (HH/HL vs LH/LL).
+  static int trendOf(List<SwingPoint> pts) {
+    final highs = pts.where((p) => p.type == 'high').toList();
+    final lows = pts.where((p) => p.type == 'low').toList();
+    if (highs.length < 2 || lows.length < 2) return 0;
+    if (highs.last.price > highs[highs.length - 2].price &&
+        lows.last.price > lows[lows.length - 2].price) {
+      return 1;
+    }
+    if (highs.last.price < highs[highs.length - 2].price &&
+        lows.last.price < lows[lows.length - 2].price) {
+      return -1;
+    }
+    return 0;
+  }
+
+  /// Equal highs / equal lows: two confirmed pivots within ATR * threshold.
+  static bool equalHighs(List<SwingPoint> pts, double atrValue,
+      {double threshold = 0.1}) {
+    final highs = pts.where((p) => p.type == 'high').toList();
+    if (highs.length < 2 || atrValue <= 0) return false;
+    final a = highs[highs.length - 1].price;
+    final b = highs[highs.length - 2].price;
+    return (max(a, b) - min(a, b)) < atrValue * threshold;
+  }
+
+  static bool equalLows(List<SwingPoint> pts, double atrValue,
+      {double threshold = 0.1}) {
+    final lows = pts.where((p) => p.type == 'low').toList();
+    if (lows.length < 2 || atrValue <= 0) return false;
+    final a = lows[lows.length - 1].price;
+    final b = lows[lows.length - 2].price;
+    return (max(a, b) - min(a, b)) < atrValue * threshold;
+  }
+
+  static bool volSpike(List<Candle> c) {
+    if (c.length < 21) return false;
+    double avg = 0;
+    for (int i = c.length - 20; i < c.length - 1; i++) {
+      avg += c[i].volume;
+    }
+    avg /= 19;
+    if (avg <= 0) return false;
+    return c.last.volume > avg * 1.5;
+  }
+
   static TFAnalysis analyze(String tf, List<Candle> c) {
     final pts = swings(c);
-    final str = structure(pts);
-    final b = bos(c, pts);
-    final sw = sweep(c, pts);
-    final obList = obs(c);
+    final internal = swings(c, len: internalLen);
+
+    final lastHigh = _lastUnbrokenHigh(pts);
+    final lastLow = _lastUnbrokenLow(pts);
+    final trend = trendOf(pts);
+
+    final recent = breaks(c, pts, barsBack: 30);
+    final internalRecent = breaks(c, internal, len: internalLen, barsBack: 6);
+
+    final atr200 = atr(c, period: 200);
+    final atrPer = atr(c);
+    final swingAtr = atr200 > 0 ? atr200 : atrPer;
+
+    final lastBreak = recent.isEmpty ? null : recent.last;
+    final event = lastBreak?.event ?? '';
+    final pattern = lastBreak?.pattern ?? '';
+    final breakFresh = lastBreak != null && c.length - 1 - lastBreak.bar <= 2;
+
+    // Order blocks come from the interval between each break and its pivot.
+    final obs = <OrderBlock>[];
+    for (final b in recent) {
+      final ob = _structureOb(
+        c,
+        b.pivot.index,
+        b.bar,
+        b.event == 'BULLISH',
+        swingAtr,
+      );
+      if (ob == null) continue;
+      final dup = obs.any((o) => o.index == ob.index && o.type == ob.type);
+      if (!dup) obs.add(ob);
+    }
+    final active = activeObs(obs, c);
+
     final fvgList = fvgs(c);
+    final eqh = equalHighs(pts, swingAtr);
+    final eql = equalLows(pts, swingAtr);
     final vs = volSpike(c);
+
+    // Premium / discount of the current swing range (LUX 5% / 47.5% split).
+    double premium = 0;
+    double equilibrium = 0;
+    double discount = 0;
+    if (lastHigh != null && lastLow != null && lastHigh.price > lastLow.price) {
+      final up = lastHigh.price;
+      final dn = lastLow.price;
+      premium = 0.95 * up + 0.05 * dn;
+      equilibrium = 0.525 * up + 0.475 * dn;
+      discount = 0.95 * dn + 0.05 * up;
+    }
+
     final px = c.last.close;
+    final insideRange = lastHigh != null &&
+        lastLow != null &&
+        px <= lastHigh.price &&
+        px >= lastLow.price;
+    final inPremium = insideRange && premium > 0 && px > premium;
+    final inDiscount = insideRange && premium > 0 && px < discount;
 
     double bs = 0;
     double ss = 0;
     final bc = <String>[];
     final sc = <String>[];
 
-    if (str == 'BULLISH' || b == 'BULLISH_BOS') {
+    if (trend > 0) {
       bs += 25;
       bc.add('Bullish structure');
     }
-    if (str == 'BEARISH' || b == 'BEARISH_BOS') {
+    if (trend < 0) {
       ss += 25;
       sc.add('Bearish structure');
     }
 
-    for (final o in obList) {
-      if (o.type == 'bullish' &&
-          px >= o.low * 0.998 &&
-          px <= o.high * 1.002) {
-        bs += 25;
-        bc.add('Inside bullish OB');
-        break;
-      }
+    if (breakFresh && event == 'BULLISH') {
+      bs += 25;
+      bc.add(pattern == 'CHoCH' ? 'Bullish CHoCH' : 'Bullish BOS');
     }
-    for (final o in obList) {
-      if (o.type == 'bearish' &&
-          px >= o.low * 0.998 &&
-          px <= o.high * 1.002) {
-        ss += 25;
-        sc.add('Inside bearish OB');
-        break;
-      }
+    if (breakFresh && event == 'BEARISH') {
+      ss += 25;
+      sc.add(pattern == 'CHoCH' ? 'Bearish CHoCH' : 'Bearish BOS');
     }
 
-    for (final f in fvgList) {
-      if (f.type == 'bullish' &&
-          px >= f.low * 0.998 &&
-          px <= f.high * 1.002) {
-        bs += 15;
-        bc.add('Inside bullish FVG');
-        break;
-      }
-    }
-    for (final f in fvgList) {
-      if (f.type == 'bearish' &&
-          px >= f.low * 0.998 &&
-          px <= f.high * 1.002) {
-        ss += 15;
-        sc.add('Inside bearish FVG');
-        break;
-      }
-    }
-
-    if (sw == 'BULLISH_SWEEP') {
-      bs += 15;
-      bc.add('Bullish sweep');
-    }
-    if (sw == 'BEARISH_SWEEP') {
-      ss += 15;
-      sc.add('Bearish sweep');
-    }
-
-    if (vs) {
+    final internalLast = internalRecent.isEmpty ? null : internalRecent.last;
+    final internalFresh = internalLast != null &&
+        c.length - 1 - internalLast.bar <= 4;
+    if (internalFresh && internalLast.event == 'BULLISH') {
       bs += 10;
+      bc.add('Internal bullish break');
+    }
+    if (internalFresh && internalLast.event == 'BEARISH') {
       ss += 10;
+      sc.add('Internal bearish break');
+    }
+
+    for (final o in active) {
+      if (px >= o.low * 0.998 && px <= o.high * 1.002) {
+        if (o.type == 'bullish') {
+          bs += 20;
+          bc.add('Inside bullish OB');
+        } else {
+          ss += 20;
+          sc.add('Inside bearish OB');
+        }
+      }
+    }
+    for (final f in fvgList) {
+      if (px >= f.low * 0.998 && px <= f.high * 1.002) {
+        if (f.type == 'bullish') {
+          bs += 10;
+          bc.add('Inside bullish FVG');
+        } else {
+          ss += 10;
+          sc.add('Inside bearish FVG');
+        }
+      }
+    }
+
+    if (eql) {
+      bs += 10;
+      bc.add('Equal lows (liquidity)');
+    }
+    if (eqh) {
+      ss += 10;
+      sc.add('Equal highs (liquidity)');
+    }
+    if (vs) {
+      bs += 5;
+      ss += 5;
       bc.add('Volume spike');
       sc.add('Volume spike');
     }
 
+    // Premium/discount: never buy at a premium, never sell at a discount.
+    if (inPremium) {
+      bs -= 20;
+      sc.add('Premium zone');
+    }
+    if (inDiscount) {
+      ss -= 20;
+      bc.add('Discount zone');
+    }
+
     return TFAnalysis(
       timeframe: tf,
-      structure: str,
-      bos: b,
-      sweep: sw,
+      structure: trend > 0
+          ? 'BULLISH'
+          : trend < 0
+              ? 'BEARISH'
+              : 'NEUTRAL',
+      bos: event.isEmpty ? null : (breakFresh ? '${event}_BOS' : null),
+      sweep: null,
       buyScore: bs,
       sellScore: ss,
       volumeSpike: vs,
       buyConf: bc,
       sellConf: sc,
-      obs: obList,
+      obs: active,
       fvgs: fvgList,
       candles: c,
       close: px,
-      atr: atr(c),
+      atr: atrPer,
+      trend: trend,
+      choch: pattern == 'CHoCH',
+      swingHigh: lastHigh,
+      swingLow: lastLow,
+      premium: premium,
+      equilibrium: equilibrium,
+      discount: discount,
+      eqh: eqh,
+      eql: eql,
+      freshBreak: breakFresh,
+      breakPattern: pattern,
+      breakEvent: event,
+      internalFresh: internalFresh,
+      internalEvent: internalLast?.event ?? '',
     );
   }
 
-  /// Closest unmitigated bullish zone below price (for a BUY limit).
-  static OrderBlock? _buyZone(List<OrderBlock> obs, double px) {
+  /// Closest active bullish OB at or below price.
+  static OrderBlock? buyZone(List<OrderBlock> obs, double px) {
     OrderBlock? best;
     for (final o in obs) {
       if (o.type != 'bullish') continue;
-      if (o.high > px * 1.005) continue; // must be at or below price
-      if (o.low < px * 0.94) continue; // ignore far-away zones
+      if (o.high > px * 1.005) continue;
+      if (o.low < px * 0.94) continue;
       if (best == null || o.high > best.high) best = o;
     }
     return best;
   }
 
-  /// Closest unmitigated bearish zone above price (for a SELL limit).
-  static OrderBlock? _sellZone(List<OrderBlock> obs, double px) {
+  /// Closest active bearish OB at or above price.
+  static OrderBlock? sellZone(List<OrderBlock> obs, double px) {
     OrderBlock? best;
     for (final o in obs) {
       if (o.type != 'bearish') continue;
-      if (o.low < px * 0.995) continue; // must be at or above price
+      if (o.low < px * 0.995) continue;
       if (o.high > px * 1.06) continue;
       if (best == null || o.low < best.low) best = o;
     }
     return best;
   }
 
-  static bool _hasBullFvg(List<FVG> fvgs, double px) => fvgs.any((f) =>
-      f.type == 'bullish' && f.high <= px * 1.005 && f.low > px * 0.94);
-
-  static bool _hasBearFvg(List<FVG> fvgs, double px) => fvgs.any((f) =>
-      f.type == 'bearish' && f.low >= px * 0.995 && f.high < px * 1.06);
-
-  /// True when price crossed [level] within the last [lookback] closed candles
-  /// of [candles] (used to require a fresh trigger, not a stale one).
-  static bool _freshCross(
-    List<Candle> candles,
-    double level,
-    bool bullish, {
-    int lookback = 3,
-  }) {
-    if (candles.length < lookback + 1) return false;
-    int from = candles.length - lookback;
-    if (from < 1) from = 1;
-    for (int i = from; i < candles.length; i++) {
-      final prev = candles[i - 1].close;
-      final cur = candles[i].close;
-      if (bullish && prev <= level && cur > level) return true;
-      if (!bullish && prev >= level && cur < level) return true;
-    }
-    return false;
-  }
-
-  /// Last swing level that price broke in the given direction.
-  static double? _brokenLevel(List<SwingPoint> pts, double px, bool bullish) {
-    final list = pts
-        .where((x) => x.type == (bullish ? 'high' : 'low'))
-        .where((x) => bullish ? x.price < px : x.price > px)
-        .toList()
-      ..sort((a, b) => bullish
-          ? b.price.compareTo(a.price)
-          : a.price.compareTo(b.price));
-    return list.isEmpty ? null : list.first.price;
-  }
-
-  /// 4H bias + 1H zone + 15M trigger. Returns null when there is no setup.
+  /// 4H bias + 1H structure/zone + 15M trigger, LUX-style.
   static TradeSignal? multiTF(
     String sym,
     List<Candle> c4,
     List<Candle> c1,
-    List<Candle> c15,
-  ) {
-    if (c4.length < 40 || c1.length < 40 || c15.length < 40) return null;
+    List<Candle> c15, {
+    bool relaxed = false,
+  }) {
+    if (c4.length < 60 || c1.length < 60 || c15.length < 60) return null;
 
     final t4 = analyze('4H', c4);
     final t1 = analyze('1H', c1);
@@ -1149,8 +1403,20 @@ class Engine {
     final px = c15.last.close;
     if (px <= 0) return null;
 
-    final bool bull4 = t4.structure == 'BULLISH' || t4.bos == 'BULLISH_BOS';
-    final bool bear4 = t4.structure == 'BEARISH' || t4.bos == 'BEARISH_BOS';
+    // Bias: 4H structure, or a break that just happened. When 4H structure is
+    // neutral we accept a fresh 4H internal break confirmed by the 1H trend.
+    final bull4 = t4.trend > 0 ||
+        (t4.freshBreak && t4.breakEvent == 'BULLISH') ||
+        (t4.trend == 0 &&
+            t4.internalFresh &&
+            t4.internalEvent == 'BULLISH' &&
+            t1.trend > 0);
+    final bear4 = t4.trend < 0 ||
+        (t4.freshBreak && t4.breakEvent == 'BEARISH') ||
+        (t4.trend == 0 &&
+            t4.internalFresh &&
+            t4.internalEvent == 'BEARISH' &&
+            t1.trend < 0);
 
     double buy = 0;
     double sell = 0;
@@ -1158,86 +1424,127 @@ class Engine {
     final sC = <String>[];
 
     if (bull4) {
-      buy += 35;
-      bC.add('4H trend bullish');
+      buy += 30;
+      bC.add('4H bullish bias');
     }
     if (bear4) {
-      sell += 35;
-      sC.add('4H trend bearish');
+      sell += 30;
+      sC.add('4H bearish bias');
     }
 
-    final buyZone = _buyZone(t1.obs, px);
-    final sellZone = _sellZone(t1.obs, px);
+    final buyOb = buyZone(t1.obs, px);
+    final sellOb = sellZone(t1.obs, px);
 
-    if (bull4 && buyZone != null) {
+    if (bull4 && buyOb != null) {
       buy += 25;
       bC.add('1H bullish OB');
     }
-    if (bear4 && sellZone != null) {
+    if (bear4 && sellOb != null) {
       sell += 25;
       sC.add('1H bearish OB');
     }
-    if (bull4 && _hasBullFvg(t1.fvgs, px)) {
-      buy += 15;
+
+    final bullFvg = t1.fvgs.any((f) =>
+        f.type == 'bullish' && f.high <= px * 1.005 && f.low > px * 0.94);
+    final bearFvg = t1.fvgs.any((f) =>
+        f.type == 'bearish' && f.low >= px * 0.995 && f.high < px * 1.06);
+
+    // A fair value gap counts as the zone when no order block is available.
+    if (bull4 && bullFvg) {
+      buy += buyOb == null ? 20 : 10;
       bC.add('1H bullish FVG');
     }
-    if (bear4 && _hasBearFvg(t1.fvgs, px)) {
-      sell += 15;
+    if (bear4 && bearFvg) {
+      sell += sellOb == null ? 20 : 10;
       sC.add('1H bearish FVG');
     }
 
-    final bull15Level = _brokenLevel(swings(c15), px, true);
-    final bear15Level = _brokenLevel(swings(c15), px, false);
+    final triggerBull = t15.freshBreak && t15.breakEvent == 'BULLISH';
+    final triggerBear = t15.freshBreak && t15.breakEvent == 'BEARISH';
+    final internalBull = t15.internalFresh && t15.internalEvent == 'BULLISH';
+    final internalBear = t15.internalFresh && t15.internalEvent == 'BEARISH';
 
-    final bool freshBull = t15.sweep == 'BULLISH_SWEEP' ||
-        (t15.bos == 'BULLISH_BOS' &&
-            bull15Level != null &&
-            _freshCross(c15, bull15Level, true));
-    final bool freshBear = t15.sweep == 'BEARISH_SWEEP' ||
-        (t15.bos == 'BEARISH_BOS' &&
-            bear15Level != null &&
-            _freshCross(c15, bear15Level, false));
-
-    if (freshBull) {
-      buy += 15;
-      bC.add('15M bullish trigger');
+    if (triggerBull) {
+      buy += 20;
+      bC.add(t15.breakPattern == 'CHoCH'
+          ? '15M bullish CHoCH'
+          : '15M bullish BOS');
+    } else if (internalBull) {
+      buy += 20;
+      bC.add('15M internal bullish break');
     }
-    if (freshBear) {
-      sell += 15;
-      sC.add('15M bearish trigger');
+    if (triggerBear) {
+      sell += 20;
+      sC.add(t15.breakPattern == 'CHoCH'
+          ? '15M bearish CHoCH'
+          : '15M bearish BOS');
+    } else if (internalBear) {
+      sell += 20;
+      sC.add('15M internal bearish break');
     }
 
     if (t15.volumeSpike) {
       if (bull4) {
-        buy += 10;
+        buy += 5;
         bC.add('15M volume spike');
       } else if (bear4) {
-        sell += 10;
+        sell += 5;
         sC.add('15M volume spike');
       }
     }
 
-    final atr1 = t1.atr > 0 ? t1.atr : px * 0.01;
+    // Premium/discount of the 1H swing range gates the direction. A breakout
+    // above/below the range is trend continuation, not a bad location.
+    final zoneNow = t1.zoneOf;
+    if (zoneNow == 'Premium') {
+      buy -= 25;
+      sC.add('1H premium zone');
+    }
+    if (zoneNow == 'Discount') {
+      sell -= 25;
+      bC.add('1H discount zone');
+    }
+    if (zoneNow == 'Breakout' && bull4) {
+      buy += 5;
+      bC.add('1H breakout');
+    }
+    if (zoneNow == 'Breakdown' && bear4) {
+      sell += 5;
+      sC.add('1H breakdown');
+    }
 
-    if (buy >= 55 && bull4 && !bear4 && buy > sell) {
+    final atr1 = t1.atr > 0 ? t1.atr : px * 0.01;
+    final zoneLabel = t1.zoneOf;
+
+    final threshold = relaxed ? 45.0 : 60.0;
+
+    if (buy >= threshold && bull4 && !bear4 && buy > sell) {
       double entry = px;
       double sl;
 
-      if (buyZone != null) {
-        // Limit into the middle of the zone when it is close enough.
-        final mid = buyZone.mid;
+      final bullGap = t1.fvgs.where((f) =>
+          f.type == 'bullish' && f.high <= px * 1.005 && f.low > px * 0.94);
+
+      if (buyOb != null) {
+        final mid = buyOb.mid;
         if ((px - mid) / px <= 0.02) entry = mid;
-        sl = buyZone.low - atr1 * 0.25;
+        sl = buyOb.low - atr1 * 0.25;
+      } else if (bullGap.isNotEmpty) {
+        final gap = bullGap.last;
+        sl = gap.low - atr1 * 0.25;
+      } else if (t15.swingLow != null) {
+        sl = t15.swingLow!.price - atr1 * 0.25;
       } else {
-        final lows = swings(c1).where((p) => p.type == 'low').toList();
-        sl = lows.isNotEmpty ? lows.last.price - atr1 * 0.25 : px - atr1 * 2;
+        sl = px - atr1 * 2;
       }
 
       if (sl >= entry) sl = entry - atr1;
       final risk = entry - sl;
-      if (risk <= 0 || risk / entry > 0.08) return null; // sanity: max 8% risk
-
-      final tp = entry + risk * 2; // fixed 2R target
+      if (risk <= 0 || risk / entry > 0.08) return null;
+      final target =
+          t15.swingHigh != null && t15.swingHigh!.price > entry * 1.005
+          ? t15.swingHigh!.price
+          : entry + risk * 2;
 
       return TradeSignal(
         symbol: sym,
@@ -1245,34 +1552,47 @@ class Engine {
         price: px,
         entry: entry,
         sl: sl,
-        tp: tp,
+        tp: target,
         confidence: buy.clamp(0.0, 100.0).toDouble(),
         confirmations: bC,
         time: DateTime.now(),
         tf4h: t4.structure,
         tf1h: t1.structure,
         tf15m: t15.structure,
+        pattern: t15.breakPattern.isEmpty ? 'BOS' : t15.breakPattern,
+        zone: zoneLabel,
+        eqh: t1.eqh,
+        eql: t1.eql,
+        watch: relaxed,
       );
     }
 
-    if (sell >= 55 && bear4 && !bull4 && sell > buy) {
+    if (sell >= threshold && bear4 && !bull4 && sell > buy) {
       double entry = px;
       double sl;
 
-      if (sellZone != null) {
-        final mid = sellZone.mid;
+      final bearGap = t1.fvgs.where((f) =>
+          f.type == 'bearish' && f.low >= px * 0.995 && f.high < px * 1.06);
+
+      if (sellOb != null) {
+        final mid = sellOb.mid;
         if ((mid - px) / px <= 0.02) entry = mid;
-        sl = sellZone.high + atr1 * 0.25;
+        sl = sellOb.high + atr1 * 0.25;
+      } else if (bearGap.isNotEmpty) {
+        final gap = bearGap.last;
+        sl = gap.high + atr1 * 0.25;
+      } else if (t15.swingHigh != null) {
+        sl = t15.swingHigh!.price + atr1 * 0.25;
       } else {
-        final highs = swings(c1).where((p) => p.type == 'high').toList();
-        sl = highs.isNotEmpty ? highs.last.price + atr1 * 0.25 : px + atr1 * 2;
+        sl = px + atr1 * 2;
       }
 
       if (sl <= entry) sl = entry + atr1;
       final risk = sl - entry;
       if (risk <= 0 || risk / entry > 0.08) return null;
-
-      final tp = entry - risk * 2;
+      final target = t15.swingLow != null && t15.swingLow!.price < entry * 0.995
+          ? t15.swingLow!.price
+          : entry - risk * 2;
 
       return TradeSignal(
         symbol: sym,
@@ -1280,13 +1600,18 @@ class Engine {
         price: px,
         entry: entry,
         sl: sl,
-        tp: tp,
+        tp: target,
         confidence: sell.clamp(0.0, 100.0).toDouble(),
         confirmations: sC,
         time: DateTime.now(),
         tf4h: t4.structure,
         tf1h: t1.structure,
         tf15m: t15.structure,
+        pattern: t15.breakPattern.isEmpty ? 'BOS' : t15.breakPattern,
+        zone: zoneLabel,
+        eqh: t1.eqh,
+        eql: t1.eql,
+        watch: relaxed,
       );
     }
 
@@ -1403,7 +1728,10 @@ class _HS extends State<HomeScreen> {
 
             if (id != _scanId || !mounted) return;
 
-            final sig = Engine.multiTF(sym, c4, c1, c15);
+            // Strict SMC confluence first; fall back to the relaxed pass so
+            // the list is not empty in quiet markets (flagged WATCH).
+            var sig = Engine.multiTF(sym, c4, c1, c15);
+            sig ??= Engine.multiTF(sym, c4, c1, c15, relaxed: true);
             if (mounted) {
               setState(() {
                 if (sig != null) _signals.add(sig);
@@ -1433,9 +1761,11 @@ class _HS extends State<HomeScreen> {
       setState(() {
         _signals.sort((a, b) => b.confidence.compareTo(a.confidence));
         _loading = false;
+        final strict = _signals.where((s) => !s.watch).length;
+        final watch = _signals.length - strict;
         _msg = _signals.isEmpty
-            ? 'Kono valid setup nei ekhon ($_feed). 5 min por auto refresh hobe.'
-            : '${_signals.length} signal ready ($_feed)'
+            ? 'Kono setup nei ekhon ($_feed). 5 min por auto refresh hobe.'
+            : '$strict signal • $watch watch ($_feed)'
                 '${_failed > 0 ? ' • $_failed coin skip' : ''}';
       });
     } catch (e) {
@@ -1569,7 +1899,7 @@ class _HS extends State<HomeScreen> {
 
   Widget _summaryPanel() {
     final buys = _signals.where((s) => s.isBuy).length;
-    final sells = _signals.length - buys;
+    final sells = _signals.where((s) => !s.isBuy).length;
 
     return Container(
       padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
@@ -1831,6 +2161,20 @@ class _HS extends State<HomeScreen> {
                       .toList(),
                 ),
                 const SizedBox(height: 18),
+                _detailRow('Setup', s.watch ? 'WATCH (relaxed)' : 'STRICT',
+                    s.watch ? K.orange : K.green),
+                _detailRow('Pattern', s.pattern,
+                    s.pattern == 'CHoCH' ? K.orange : K.green),
+                _detailRow('1H zone', s.zone,
+                    s.zone == 'Discount'
+                        ? K.green
+                        : s.zone == 'Premium'
+                            ? K.red
+                            : K.muted),
+                _detailRow('Liquidity',
+                    '${s.eqh ? 'EQH ' : ''}${s.eql ? 'EQL' : ''}'.trim().isEmpty
+                        ? 'None'
+                        : '${s.eqh ? 'EQH ' : ''}${s.eql ? 'EQL' : ''}'.trim()),
                 _detailRow('4H structure', s.tf4h),
                 _detailRow('1H structure', s.tf1h),
                 _detailRow('15M structure', s.tf15m),
@@ -1964,9 +2308,36 @@ class _SignalCard extends StatelessWidget {
                           fontWeight: FontWeight.bold,
                         ),
                       ),
-                      Text(
-                        '${signal.direction} • ${timeAgo(signal.time)}',
-                        style: TextStyle(color: color, fontSize: 10),
+                      Row(
+                        children: <Widget>[
+                          if (signal.watch) ...<Widget>[
+                            Container(
+                              margin: const EdgeInsets.only(right: 5),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 4, vertical: 1),
+                              decoration: BoxDecoration(
+                                color: K.orange.withOpacity(0.18),
+                                borderRadius: BorderRadius.circular(3),
+                              ),
+                              child: const Text(
+                                'WATCH',
+                                style: TextStyle(
+                                  color: K.orange,
+                                  fontSize: 8,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ],
+                          Flexible(
+                            child: Text(
+                              '${signal.direction} • ${signal.pattern} • '
+                              '${signal.zone} • ${timeAgo(signal.time)}',
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(color: color, fontSize: 10),
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),

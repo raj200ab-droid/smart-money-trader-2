@@ -17,6 +17,28 @@ A trade signal only fires when the 4H bias, the 1H zone and the 15M trigger agre
 Stops sit beyond the zone (ATR-buffered), targets are a fixed 2R, and setups risking
 more than 8% of entry are discarded.
 
+## Engine (LuxAlgo "Smart Money Concepts" model)
+
+The confluence engine is a from-scratch Dart implementation of the published
+logic of LuxAlgo's *Smart Money Concepts* indicator (CC BY-NC-SA 4.0) — no Pine
+code is copied.
+
+- Pivot state machine: swing length 50, internal length 5 (`ta.highest/lowest`
+  semantics; a pivot is confirmed `len` bars later)
+- **BOS vs CHoCH**: a break with the prior structure is a continuation BOS, a
+  break against it is a reversal CHoCH
+- Order blocks built from the structure interval between the break and the
+  pivot (candles under 2× ATR), removed once price closes through them
+- Fair value gaps with the running-mean delta threshold, removed on fill
+- EQH/EQL liquidity pools at 0.1× ATR
+- Premium / discount / equilibrium zones (5% / 47.5% split); breakouts above or
+  below the swing range are labelled separately and do not block a trend entry
+
+Signals fire in two passes: a **STRICT** pass (4H bias + 1H OB/FVG zone +
+15M BOS/CHoCH trigger + zone location) and, if that finds nothing, a **WATCH**
+pass with a lower threshold and no counter-trend gate. Watch signals are marked
+`WATCH` in the list.
+
 ## Signal output
 
 - Direction (BUY / SELL) and confidence score
