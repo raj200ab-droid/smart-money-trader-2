@@ -1621,6 +1621,207 @@ class Engine {
 }
 
 // =====================================================================
+// BACKTEST
+//
+// Walks the candle history bar by bar, asks the same engine for a signal at
+// each close (seeing only candles up to that bar), then follows the trade
+// forward to see whether the stop or the target was hit first.
+// =====================================================================
+
+class BacktestTrade {
+  BacktestTrade({
+    required this.symbol,
+    required this.isBuy,
+    required this.entry,
+    required this.sl,
+    required this.tp,
+    required this.confidence,
+    required this.watch,
+    required this.outcome,
+    required this.rMultiple,
+  });
+
+  final String symbol;
+  final bool isBuy;
+  final double entry;
+  final double sl;
+  final double tp;
+  final double confidence;
+  final bool watch;
+
+  /// 'TP' | 'SL' | 'OPEN'
+  final String outcome;
+  final double rMultiple;
+}
+
+class BacktestResult {
+  BacktestResult({
+    required this.symbol,
+    required this.trades,
+    required this.barsUsed,
+    required this.startTime,
+    required this.endTime,
+  });
+
+  final String symbol;
+  final List<BacktestTrade> trades;
+  final int barsUsed;
+  final DateTime startTime;
+  final DateTime endTime;
+
+  int get total => trades.length;
+  int get closed => trades.where((t) => t.outcome != 'OPEN').length;
+  int get wins => trades.where((t) => t.outcome == 'TP').length;
+  int get losses => trades.where((t) => t.outcome == 'SL').length;
+
+  /// Percent of decided trades that hit the target.
+  double get winRate => closed == 0 ? 0 : wins / closed * 100;
+
+  /// Sum of R multiples over decided trades.
+  double get totalR =>
+      trades.where((t) => t.outcome != 'OPEN').fold<double>(0, (a, t) => a + t.rMultiple);
+
+  double get avgR => closed == 0 ? 0 : totalR / closed;
+
+  /// Expectancy in R per trade.
+  double get expectancy => avgR;
+
+  int get strictTotal => trades.where((t) => !t.watch).length;
+  int get strictWins =>
+      trades.where((t) => !t.watch && t.outcome == 'TP').length;
+  int get strictClosed =>
+      trades.where((t) => !t.watch && t.outcome != 'OPEN').length;
+  double get strictWinRate =>
+      strictClosed == 0 ? 0 : strictWins / strictClosed * 100;
+
+  int get currentStreak {
+    int streak = 0;
+    for (final t in trades.reversed) {
+      if (t.outcome == 'TP') {
+        if (streak < 0) break;
+        streak++;
+      } else if (t.outcome == 'SL') {
+        if (streak > 0) break;
+        streak--;
+      }
+    }
+    return streak;
+  }
+}
+
+class Backtester {
+  /// How many bars of history the simulation keeps feeding the engine.
+  static const int window = 200;
+
+  /// Runs the engine over [bars], stepping forward one bar per signal check.
+  /// A trade is only opened when no earlier trade is still open, which keeps
+  /// the statistics honest (no overlapping copies of the same move).
+  static BacktestResult run(
+    String symbol,
+    List<Candle> c4,
+    List<Candle> c1,
+    List<Candle> c15, {
+    int step = 1,
+    int maxTrades = 60,
+  }) {
+    final trades = <BacktestTrade>[];
+    final n = c15.length;
+    if (n < window + 20) {
+      return BacktestResult(
+        symbol: symbol,
+        trades: trades,
+        barsUsed: n,
+        startTime: DateTime.fromMillisecondsSinceEpoch(
+          n == 0 ? 0 : c15.last.openTime,
+        ),
+        endTime: DateTime.now(),
+      );
+    }
+
+    int openUntil = -1;
+    int lastSignalBar = -window;
+
+    for (int i = window; i < n - 1; i += step) {
+      if (i <= openUntil) continue; // still in a trade
+      if (i - lastSignalBar < 2) continue; // do not spam the same move
+
+      final w15 = c15.sublist(i - window, i + 1);
+      final w1 = _aligned(c1, c15[i].closeTime, window);
+      final w4 = _aligned(c4, c15[i].closeTime, window);
+      if (w1 == null || w4 == null) continue;
+
+      var sig = Engine.multiTF(symbol, w4, w1, w15);
+      sig ??= Engine.multiTF(symbol, w4, w1, w15, relaxed: true);
+      if (sig == null) continue;
+
+      // Follow the trade on the 15M series.
+      String outcome = 'OPEN';
+      double rMult = 0;
+      for (int j = i + 1; j < n; j++) {
+        final bar = c15[j];
+        final hitSl = sig.isBuy ? bar.low <= sig.sl : bar.high >= sig.sl;
+        final hitTp = sig.isBuy ? bar.high >= sig.tp : bar.low <= sig.tp;
+        if (hitSl && hitTp) {
+          outcome = 'SL'; // ambiguous bar: assume the worst
+          rMult = -1;
+          openUntil = j;
+          break;
+        }
+        if (hitSl) {
+          outcome = 'SL';
+          rMult = -1;
+          openUntil = j;
+          break;
+        }
+        if (hitTp) {
+          outcome = 'TP';
+          rMult = (sig.tp - sig.entry).abs() / (sig.sl - sig.entry).abs();
+          openUntil = j;
+          break;
+        }
+      }
+
+      trades.add(BacktestTrade(
+        symbol: symbol,
+        isBuy: sig.isBuy,
+        entry: sig.entry,
+        sl: sig.sl,
+        tp: sig.tp,
+        confidence: sig.confidence,
+        watch: sig.watch,
+        outcome: outcome,
+        rMultiple: rMult,
+      ));
+      lastSignalBar = i;
+
+      if (trades.length >= maxTrades) break;
+    }
+
+    final first = c15.length > window ? c15[window] : c15.first;
+    return BacktestResult(
+      symbol: symbol,
+      trades: trades,
+      barsUsed: n,
+      startTime: DateTime.fromMillisecondsSinceEpoch(first.openTime),
+      endTime: DateTime.fromMillisecondsSinceEpoch(c15.last.openTime),
+    );
+  }
+
+  /// Last [count] candles of [series] that closed at or before [time].
+  static List<Candle>? _aligned(List<Candle> series, int time, int count) {
+    int end = series.length;
+    for (int i = series.length - 1; i >= 0; i--) {
+      if (series[i].closeTime <= time) {
+        end = i + 1;
+        break;
+      }
+    }
+    if (end < count) return null;
+    return series.sublist(end - count, end);
+  }
+}
+
+// =====================================================================
 // UI
 // =====================================================================
 
@@ -1817,6 +2018,17 @@ class _HS extends State<HomeScreen> {
           ],
         ),
         actions: <Widget>[
+          IconButton(
+            icon: const Icon(Icons.insights, color: K.text),
+            tooltip: 'Backtest',
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const BacktestScreen(),
+                ),
+              );
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.refresh, color: K.text),
             tooltip: 'Rescan',
@@ -2435,3 +2647,352 @@ class _SignalCard extends StatelessWidget {
     );
   }
 }
+
+// =====================================================================
+// BACKTEST SCREEN
+// =====================================================================
+
+class BacktestScreen extends StatefulWidget {
+  const BacktestScreen({Key? key}) : super(key: key);
+
+  @override
+  State<BacktestScreen> createState() => _BTS();
+}
+
+class _BTS extends State<BacktestScreen> {
+  final _controller = TextEditingController(text: 'BTCUSDT');
+  bool _running = false;
+  String _msg = 'Coin likhe Run dao';
+  BacktestResult? _result;
+  int _checks = 0;
+  Timer? _timer;
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _run() async {
+    final sym = _controller.text.trim().toUpperCase();
+    if (sym.isEmpty) return;
+    final symbol = sym.endsWith('USDT') ? sym : '${sym}USDT';
+
+    setState(() {
+      _running = true;
+      _result = null;
+      _msg = 'History anchi ($symbol)...';
+      _checks = 0;
+    });
+
+    // Keeps the ticker alive while the synchronous simulation runs.
+    _timer?.cancel();
+    _timer = Timer.periodic(const Duration(milliseconds: 400), (_) {
+      if (mounted) setState(() => _checks++);
+    });
+
+    try {
+      final c4 = await MarketData.candles(symbol, '4h', 1000);
+      final c1 = await MarketData.candles(symbol, '1h', 1000);
+      final c15 = await MarketData.candles(symbol, '15m', 1000);
+      if (!mounted) return;
+
+      setState(() => _msg = 'Simulating ${c15.length} bars...');
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      final result = Backtester.run(symbol, c4, c1, c15);
+      if (!mounted) return;
+      setState(() {
+        _result = result;
+        _running = false;
+        _msg = result.trades.isEmpty
+            ? 'Ei coin e kono setup nei ekhon ($symbol). Onno coin try koro.'
+            : '${result.total} trade • win rate '
+                '${result.winRate.toStringAsFixed(0)}%';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      var detail = e.toString().replaceAll('MarketDataException: ', '');
+      if (detail.length > 90) detail = '${detail.substring(0, 90)}...';
+      setState(() {
+        _running = false;
+        _msg = 'Fail ($symbol): $detail';
+      });
+    } finally {
+      _timer?.cancel();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: K.bg,
+      appBar: AppBar(
+        backgroundColor: K.panel,
+        title: const Text(
+          'Backtest',
+          style: TextStyle(color: K.text, fontSize: 17, fontWeight: FontWeight.bold),
+        ),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(14),
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: TextField(
+                  controller: _controller,
+                  style: const TextStyle(color: K.text, fontSize: 14),
+                  textCapitalization: TextCapitalization.characters,
+                  decoration: InputDecoration(
+                    hintText: 'BTC / ETH / SOL',
+                    hintStyle: const TextStyle(color: K.muted, fontSize: 13),
+                    filled: true,
+                    fillColor: K.panel2,
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: K.line),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: K.line),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              ElevatedButton(
+                onPressed: _running ? null : _run,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: K.green,
+                  foregroundColor: const Color(0xFF07120B),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                child: _running
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Color(0xFF07120B),
+                        ),
+                      )
+                    : const Text('Run',
+                        style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            _running ? '$_msg  •  $_checks bar checked' : _msg,
+            style: const TextStyle(color: K.muted, fontSize: 11),
+          ),
+          const SizedBox(height: 16),
+          if (_result != null) ..._report(_result!),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _report(BacktestResult r) {
+    final n = r.trades.length;
+    final good = r.totalR >= 0;
+    return <Widget>[
+      _statCard('Win rate', '${r.winRate.toStringAsFixed(1)}%',
+          r.winRate >= 50 ? K.green : K.orange),
+      const SizedBox(height: 10),
+      Row(
+        children: <Widget>[
+          Expanded(
+            child: _miniStat('Trades', '$n', K.text),
+          ),
+          const SizedBox(width: 8),
+          Expanded(child: _miniStat('Win / Loss', '${r.wins} / ${r.losses}', K.text)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: _miniStat(
+              'Total R',
+              '${r.totalR >= 0 ? '+' : ''}${r.totalR.toStringAsFixed(2)}R',
+              good ? K.green : K.red,
+            ),
+          ),
+        ],
+      ),
+      const SizedBox(height: 8),
+      Row(
+        children: <Widget>[
+          Expanded(
+            child: _miniStat(
+              'Avg R / trade',
+              '${r.avgR >= 0 ? '+' : ''}${r.avgR.toStringAsFixed(2)}R',
+              r.avgR >= 0 ? K.green : K.red,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: _miniStat(
+              'Strict only',
+              '${r.strictWinRate.toStringAsFixed(0)}% (${r.strictTotal})',
+              K.blue,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: _miniStat(
+              'Streak',
+              '${r.currentStreak > 0 ? '+' : ''}${r.currentStreak}',
+              r.currentStreak >= 0 ? K.green : K.red,
+            ),
+          ),
+        ],
+      ),
+      const SizedBox(height: 14),
+      Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: K.panel,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: K.line),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            const Text('Sample',
+                style: TextStyle(
+                    color: K.text, fontSize: 12, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 6),
+            Text(
+              '${r.symbol} • ${r.barsUsed} bar 15M '
+              '(${_date(r.startTime)} → ${_date(r.endTime)})',
+              style: const TextStyle(color: K.muted, fontSize: 11, height: 1.4),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Win rate ${r.winRate.toStringAsFixed(0)}% mane protiti 3 trade e '
+              '2 tar target hobe. R positive hole strategy labh e ache.',
+              style: const TextStyle(color: K.muted, fontSize: 11, height: 1.4),
+            ),
+          ],
+        ),
+      ),
+      const SizedBox(height: 14),
+      const Text('Trade list',
+          style: TextStyle(
+              color: K.text, fontSize: 13, fontWeight: FontWeight.bold)),
+      const SizedBox(height: 8),
+      ...r.trades.reversed.map(_tradeRow),
+    ];
+  }
+
+  String _date(DateTime t) =>
+      '${t.day}/${t.month}/${t.year % 100}';
+
+  Widget _tradeRow(BacktestTrade t) {
+    final color = t.outcome == 'TP'
+        ? K.green
+        : t.outcome == 'SL'
+            ? K.red
+            : K.muted;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: K.panel,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: K.line),
+      ),
+      child: Row(
+        children: <Widget>[
+          Container(
+            width: 3,
+            height: 20,
+            decoration: BoxDecoration(
+              color: t.isBuy ? K.green : K.red,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(t.isBuy ? 'BUY' : 'SELL',
+              style: TextStyle(
+                  color: t.isBuy ? K.green : K.red,
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold)),
+          const SizedBox(width: 8),
+          if (t.watch)
+            const Padding(
+              padding: EdgeInsets.only(right: 8),
+              child: Text('WATCH',
+                  style: TextStyle(
+                      color: K.orange, fontSize: 8, fontWeight: FontWeight.bold)),
+            ),
+          Expanded(
+            child: Text(
+              '${fmtPrice(t.entry)} → ${fmtPrice(t.tp)}',
+              style: const TextStyle(color: K.muted, fontSize: 11),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          Text(
+            '${t.outcome} ${t.outcome == 'OPEN' ? '' : '${t.rMultiple >= 0 ? '+' : ''}${t.rMultiple.toStringAsFixed(1)}R'}',
+            style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.bold),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _statCard(String label, String value, Color color) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: K.panel,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withOpacity(0.5)),
+      ),
+      child: Column(
+        children: <Widget>[
+          Text(label,
+              style: const TextStyle(color: K.muted, fontSize: 11)),
+          const SizedBox(height: 6),
+          Text(value,
+              style: TextStyle(
+                  color: color, fontSize: 30, fontWeight: FontWeight.bold)),
+        ],
+      ),
+    );
+  }
+
+  Widget _miniStat(String label, String value, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+      decoration: BoxDecoration(
+        color: K.panel,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: K.line),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(label, style: const TextStyle(color: K.muted, fontSize: 9)),
+          const SizedBox(height: 4),
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(value,
+                style: TextStyle(
+                    color: color, fontSize: 14, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
