@@ -2,7 +2,8 @@ name: Build APK
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'arena/**']
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -20,6 +21,7 @@ jobs:
         with:
           flutter-version: '3.16.0'
           channel: 'stable'
+          cache: true
 
       - name: Create Android Project
         run: |
@@ -29,17 +31,32 @@ jobs:
           cp /tmp/my_main.dart lib/main.dart
           cp /tmp/my_pubspec.yaml pubspec.yaml
           echo "=== Files Restored ==="
-          head -3 lib/main.dart
-          head -3 pubspec.yaml
+          wc -l lib/main.dart
+
+      - name: Enable network permission for release builds
+        run: python3 tool/patch_manifest.py
 
       - name: Get Dependencies
         run: flutter pub get
 
+      - name: Analyze
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
       - name: Build APK
         run: flutter build apk --release
+
+      - name: Verify APK has INTERNET permission
+        run: |
+          AAPT=$(ls "$ANDROID_HOME"/build-tools/*/aapt2 | tail -1)
+          echo "using $AAPT"
+          "$AAPT" dump permissions build/app/outputs/flutter-apk/app-release.apk \
+            | tee /tmp/permissions.txt
+          grep -q "android.permission.INTERNET" /tmp/permissions.txt \
+            || { echo "::error::release APK has no INTERNET permission"; exit 1; }
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: smart-money-trader-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
