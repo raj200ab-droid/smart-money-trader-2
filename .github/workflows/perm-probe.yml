@@ -1,7 +1,0 @@
-name: perm probe
-on: workflow_dispatch
-jobs:
-  noop:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo probe
