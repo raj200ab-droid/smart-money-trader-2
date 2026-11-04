@@ -143,5 +143,7 @@ feed actually in use is shown next to the progress message (`15 signal ready
 
 ## Project memory
 
-Every decision, the reasons behind it, and the list of open items live in
-[`NOTES.md`](NOTES.md). Read that before changing engine behaviour.
+Start with [`HANDOFF.md`](HANDOFF.md) — it is the full context transfer: how to
+talk to the user, every request, the exact engine and backtest rules, every root
+cause found, the measured numbers, and what is still open. [`NOTES.md`](NOTES.md)
+is the shorter decision log. Read one of them before changing engine behaviour.
