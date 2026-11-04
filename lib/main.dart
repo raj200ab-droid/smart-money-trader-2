@@ -20,6 +20,13 @@ void main() {
 }
 
 /// App-wide colours (GitHub dark palette).
+/// Shown in the status panel so an old APK can be recognised on sight.
+const String kBuild = 'v4 · radar';
+
+/// App version reported to Android, so the installed build is identifiable
+/// from Settings without opening the app.
+const String kVersionName = '4.0.0+4';
+
 class K {
   static const Color bg = Color(0xFF0D1117);
   static const Color panel = Color(0xFF161B22);
@@ -296,6 +303,7 @@ class TradeSignal {
     required this.eqh,
     required this.eql,
     required this.watch,
+    required this.tier,
   });
 
   final String symbol;
@@ -323,6 +331,13 @@ class TradeSignal {
 
   /// True when only the relaxed (lower-conviction) pass produced this signal.
   final bool watch;
+
+  /// 'STRICT' (full confluence), 'WATCH' (relaxed trigger/threshold) or
+  /// 'RADAR' (bias and trigger present, zone or score still missing). RADAR is
+  /// explicitly a candidate list, never a trade instruction.
+  final String tier;
+
+  bool get isRadar => tier == 'RADAR';
 
   bool get isBuy => direction == 'BUY';
 
@@ -1671,6 +1686,7 @@ class Engine {
         eqh: t1.eqh,
         eql: t1.eql,
         watch: relaxed,
+        tier: relaxed ? 'WATCH' : 'STRICT',
       );
     }
 
@@ -1726,10 +1742,106 @@ class Engine {
         eqh: t1.eqh,
         eql: t1.eql,
         watch: relaxed,
+        tier: relaxed ? 'WATCH' : 'STRICT',
       );
     }
 
     return null;
+  }
+
+  /// Fallback candidate: the higher timeframe has a direction and the 15M has
+  /// a live break, but the zone or the score is still missing. Strict SMC
+  /// says do not trade this; it is still the honest answer to "what is the
+  /// engine watching right now" and keeps a quiet scan useful.
+  static TradeSignal? radar(
+    String sym,
+    List<Candle> c4,
+    List<Candle> c1,
+    List<Candle> c15, {
+    List<Candle>? c4Long,
+    List<Candle>? c1Long,
+  }) {
+    if (c4.length < 60 || c1.length < 60 || c15.length < 60) return null;
+
+    final t4 = analyzeLong('4H', c4, c4Long ?? c4);
+    final t1 = analyzeLong('1H', c1, c1Long ?? c1);
+    final t15 = analyze('15M', c15);
+    final px = c15.last.close;
+    if (px <= 0) return null;
+
+    if (t4.trend == 0) return null;
+
+    final bull = t4.trend > 0;
+    final trigOk = bull
+        ? (t15.breakEvent == 'BULLISH' && px > t15.breakLevel) ||
+            (t15.internalFresh && t15.internalEvent == 'BULLISH')
+        : (t15.breakEvent == 'BEARISH' && px < t15.breakLevel) ||
+            (t15.internalFresh && t15.internalEvent == 'BEARISH');
+    if (!trigOk) return null;
+
+    final atr1 = t1.atr > 0 ? t1.atr : px * 0.01;
+    final ob = bull ? buyZone(t1.obs, px) : sellZone(t1.obs, px);
+    final gap = t1.fvgs.where((f) => bull
+        ? (f.type == 'bullish' && f.high <= px * 1.005 && f.low > px * 0.94)
+        : (f.type == 'bearish' &&
+            f.low >= px * 0.995 &&
+            f.high < px * 1.06));
+    final swing = bull ? t15.swingLow : t15.swingHigh;
+
+    double sl;
+    if (ob != null) {
+      sl = bull ? ob.low - atr1 * 0.25 : ob.high + atr1 * 0.25;
+    } else if (gap.isNotEmpty) {
+      sl = bull ? gap.last.low - atr1 * 0.25 : gap.last.high + atr1 * 0.25;
+    } else if (swing != null) {
+      sl = bull ? swing.price - atr1 * 0.25 : swing.price + atr1 * 0.25;
+    } else {
+      sl = bull ? px - atr1 * 2 : px + atr1 * 2;
+    }
+
+    final risk = (px - sl).abs();
+    if (risk <= 0 || risk / px > 0.08) return null;
+
+    final tp = bull
+        ? (t15.swingHigh != null && t15.swingHigh!.price > px * 1.005
+            ? t15.swingHigh!.price
+            : px + risk * 2)
+        : (t15.swingLow != null && t15.swingLow!.price < px * 0.995
+            ? t15.swingLow!.price
+            : px - risk * 2);
+
+    final why = <String>[
+      bull ? '4H bullish bias' : '4H bearish bias',
+      if (t15.breakEvent.isNotEmpty)
+        '15M ${bull ? 'bullish' : 'bearish'} '
+            '${t15.breakPattern.isEmpty ? 'BOS' : t15.breakPattern}'
+      else
+        '15M internal break',
+      if (ob == null && gap.isEmpty) 'Zone nei — wait koro' else 'Zone ache',
+      if (t1.zoneOf == 'Premium' || t1.zoneOf == 'Discount')
+        '${t1.zoneOf} penalty',
+    ];
+
+    return TradeSignal(
+      symbol: sym,
+      direction: bull ? 'BUY' : 'SELL',
+      price: px,
+      entry: px,
+      sl: sl,
+      tp: tp,
+      confidence: 0,
+      confirmations: why,
+      time: DateTime.now(),
+      tf4h: t4.structure,
+      tf1h: t1.structure,
+      tf15m: t15.structure,
+      pattern: t15.breakPattern.isEmpty ? 'BOS' : t15.breakPattern,
+      zone: t1.zoneOf,
+      eqh: t1.eqh,
+      eql: t1.eql,
+      watch: true,
+      tier: 'RADAR',
+    );
   }
 }
 
@@ -2070,6 +2182,10 @@ class _HS extends State<HomeScreen> {
             var sig = Engine.multiTF(sym, w4, w1, w15, c4Long: c4, c1Long: c1);
             sig ??= Engine.multiTF(sym, w4, w1, w15,
                 c4Long: c4, c1Long: c1, relaxed: true);
+            // Nothing strict or relaxed: fall back to the radar candidate so a
+            // quiet market still shows what the engine is watching.
+            sig ??= Engine.radar(sym, w4, w1, w15, c4Long: c4, c1Long: c1);
+
             if (mounted) {
               setState(() {
                 if (sig != null) {
@@ -2111,10 +2227,16 @@ class _HS extends State<HomeScreen> {
       if (id != _scanId || !mounted) return;
 
       setState(() {
-        _signals.sort((a, b) => b.confidence.compareTo(a.confidence));
+        int rank(TradeSignal t) =>
+            t.tier == 'STRICT' ? 2 : (t.tier == 'WATCH' ? 1 : 0);
+        _signals.sort((a, b) {
+          final r = rank(b).compareTo(rank(a));
+          return r != 0 ? r : b.confidence.compareTo(a.confidence);
+        });
         _loading = false;
-        final strict = _signals.where((s) => !s.watch).length;
-        final watch = _signals.length - strict;
+        final strict = _signals.where((s) => s.tier == 'STRICT').length;
+        final watch = _signals.where((s) => s.tier == 'WATCH').length;
+        final radar = _signals.where((s) => s.isRadar).length;
         // An empty list must explain itself: "no 4H trend" and "trend but no
         // 15M trigger" are completely different problems.
         final why = _noBias >= _biasNoSetup
@@ -2123,7 +2245,7 @@ class _HS extends State<HomeScreen> {
                 'mile nai';
         _msg = _signals.isEmpty
             ? 'Kono setup nei ekhon ($_feed) — $why. 5 min por auto refresh.'
-            : '$strict signal • $watch watch ($_feed)'
+            : '$strict signal • $watch watch • $radar radar ($_feed)'
                 '${_failed > 0 ? ' • $_failed coin skip' : ''}';
       });
     } catch (e) {
@@ -2226,6 +2348,11 @@ class _HS extends State<HomeScreen> {
                   Text(
                     _loading ? 'Analyzing...' : 'Done',
                     style: const TextStyle(color: K.muted, fontSize: 12),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    kBuild,
+                    style: const TextStyle(color: K.green, fontSize: 10),
                   ),
                 ],
               ),
@@ -2351,7 +2478,7 @@ class _HS extends State<HomeScreen> {
             Center(
               child: Text(
                 _signals.isEmpty
-                    ? 'No setup right now'
+                    ? 'Kono setup nei'
                     : 'No $_filter signals',
                 style: const TextStyle(
                   color: K.text,
@@ -2365,8 +2492,8 @@ class _HS extends State<HomeScreen> {
               child: Padding(
                 padding: EdgeInsets.symmetric(horizontal: 34),
                 child: Text(
-                  'Engine 4H bias + 1H OB/FVG + 15M trigger khujche. '
-                  'Auto refresh every 5 min.',
+                  'Strict SMC setup (4H bias + 1H OB/FVG + 15M trigger) '
+                  'ekhon nei. Niche dekho kon coin koto duro eshechilo.',
                   textAlign: TextAlign.center,
                   style: TextStyle(color: K.muted, fontSize: 12, height: 1.4),
                 ),
@@ -2558,8 +2685,18 @@ class _HS extends State<HomeScreen> {
                       .toList(),
                 ),
                 const SizedBox(height: 18),
-                _detailRow('Setup', s.watch ? 'WATCH (relaxed)' : 'STRICT',
-                    s.watch ? K.orange : K.green),
+                _detailRow(
+                    'Setup',
+                    s.isRadar
+                        ? 'RADAR (candidate, no trade)'
+                        : s.watch
+                            ? 'WATCH (relaxed)'
+                            : 'STRICT',
+                    s.isRadar
+                        ? K.muted
+                        : s.watch
+                            ? K.orange
+                            : K.green),
                 _detailRow('Pattern', s.pattern,
                     s.pattern == 'CHoCH' ? K.orange : K.green),
                 _detailRow('1H zone', s.zone,
@@ -2707,25 +2844,30 @@ class _SignalCard extends StatelessWidget {
                       ),
                       Row(
                         children: <Widget>[
-                          if (signal.watch) ...<Widget>[
-                            Container(
+                          Builder(builder: (context) {
+                            final tierColor = signal.isRadar
+                                ? K.muted
+                                : signal.watch
+                                    ? K.orange
+                                    : K.green;
+                            return Container(
                               margin: const EdgeInsets.only(right: 5),
                               padding: const EdgeInsets.symmetric(
                                   horizontal: 4, vertical: 1),
                               decoration: BoxDecoration(
-                                color: K.orange.withOpacity(0.18),
+                                color: tierColor.withOpacity(0.18),
                                 borderRadius: BorderRadius.circular(3),
                               ),
-                              child: const Text(
-                                'WATCH',
+                              child: Text(
+                                signal.tier,
                                 style: TextStyle(
-                                  color: K.orange,
+                                  color: tierColor,
                                   fontSize: 8,
                                   fontWeight: FontWeight.bold,
                                 ),
                               ),
-                            ),
-                          ],
+                            );
+                          }),
                           Flexible(
                             child: Text(
                               '${signal.direction} • ${signal.pattern} • '
