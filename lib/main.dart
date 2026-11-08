@@ -21,11 +21,22 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v6 · unify';
+const String kBuild = 'v7 · tp1.05';
 
 /// App version reported to Android, so the installed build is identifiable
 /// from Settings without opening the app.
-const String kVersionName = '6.0.0+6';
+const String kVersionName = '7.0.0+7';
+
+/// Take profit distance, in percent from entry, for every signal and backtest
+/// trade. Fixed on purpose (user request); the stop stays structure-based, so
+/// the report must show the reward:risk it implies, not just the win rate.
+const double kTpPct = 1.05;
+
+/// Round-trip fee + spread assumption used only by the backtest report, in
+/// percent of entry. 0.25% is roughly Binance spot taker (0.1% x 2) plus a
+/// small spread on a liquid pair; illiquid alts are worse, which is why the
+/// report prints the number instead of hiding it.
+const double kCostPct = 0.25;
 
 class K {
   static const Color bg = Color(0xFF0D1117);
@@ -1802,10 +1813,14 @@ class Engine {
       if (sl >= entry) sl = entry - atr1;
       final risk = entry - sl;
       if (risk <= 0 || risk / entry > 0.08) return null;
-      final target =
-          t15.swingHigh != null && t15.swingHigh!.price > entry * 1.005
-          ? t15.swingHigh!.price
-          : entry + risk * 2;
+      // A stop closer than the target would be hit first by construction, so
+      // the trade would be a guaranteed loss. Reject it instead of reporting it.
+      if (risk / entry < kTpPct / 100) return null;
+      // Backtest/scan target: a fixed 1.05% move from entry, as requested.
+      // It is deliberately independent of the stop distance, so the reward:risk
+      // of a trade is whatever the stop happens to be -- the report prints the
+      // implied R:R and the break-even win rate next to it.
+      final target = entry * (1 + kTpPct / 100);
 
       if (t15.breakAge > 2) {
         bC.add('15M bullish break ${t15.breakAge} bar age');
@@ -1864,9 +1879,8 @@ class Engine {
       if (sl <= entry) sl = entry + atr1;
       final risk = sl - entry;
       if (risk <= 0 || risk / entry > 0.08) return null;
-      final target = t15.swingLow != null && t15.swingLow!.price < entry * 0.995
-          ? t15.swingLow!.price
-          : entry - risk * 2;
+      if (risk / entry < kTpPct / 100) return null;
+      final target = entry * (1 - kTpPct / 100);
 
       if (t15.breakAge > 2) {
         sC.add('15M bearish break ${t15.breakAge} bar age');
@@ -2066,11 +2080,69 @@ class BacktestResult {
   /// Expectancy in R per trade.
   double get expectancy => avgR;
 
+  /// Average reward:risk actually taken. With a fixed 1.05% target this is
+  /// decided by the stop distance, so it has to be shown, not assumed.
+  double get avgRR {
+    final done = trades.where((t) => t.outcome != 'OPEN');
+    if (done.isEmpty) return 0;
+    double sum = 0;
+    for (final t in done) {
+      final risk = (t.entry - t.sl).abs();
+      if (risk > 0) sum += (t.tp - t.entry).abs() / risk;
+    }
+    return sum / done.length;
+  }
+
+  /// Win rate needed to break even at that reward:risk, in percent.
+  double get breakEvenWinRate {
+    final rr = avgRR;
+    if (rr <= 0) return 0;
+    return 1 / (1 + rr) * 100;
+  }
+
+  /// Win rate if each trade were charged [costPct] of entry in fees+spread,
+  /// expressed in R. The screen quotes it so a 75% win rate is never mistaken
+  /// for profit.
+  double winRateAfterCost(double costPct) {
+    final done = trades.where((t) => t.outcome != 'OPEN').toList();
+    if (done.isEmpty) return 0;
+    int wins = 0;
+    for (final t in done) {
+      final risk = (t.entry - t.sl).abs();
+      if (risk <= 0) continue;
+      final costR = (t.entry * costPct / 100) / risk;
+      final r = t.outcome == 'TP'
+          ? (t.tp - t.entry).abs() / risk - costR
+          : -1.0 - costR;
+      if (r > 0) wins++;
+    }
+    return wins / done.length * 100;
+  }
+
+  /// Total R after the same cost.
+  double totalRAfterCost(double costPct) {
+    double sum = 0;
+    for (final t in trades.where((t) => t.outcome != 'OPEN')) {
+      final risk = (t.entry - t.sl).abs();
+      if (risk <= 0) continue;
+      final costR = (t.entry * costPct / 100) / risk;
+      sum += (t.outcome == 'TP' ? (t.tp - t.entry).abs() / risk : -1.0) - costR;
+    }
+    return sum;
+  }
+
+  /// Trades whose stop sat closer than the target (they can only lose).
+  int get invertedTrades => trades.where((t) {
+        final risk = (t.entry - t.sl).abs();
+        return risk < (t.tp - t.entry).abs();
+      }).length;
+
   int get strictTotal => trades.where((t) => !t.watch).length;
   int get strictWins =>
       trades.where((t) => !t.watch && t.outcome == 'TP').length;
   int get strictClosed =>
       trades.where((t) => !t.watch && t.outcome != 'OPEN').length;
+  /// Win rate of STRICT-only signals: the higher-quality subset.
   double get strictWinRate =>
       strictClosed == 0 ? 0 : strictWins / strictClosed * 100;
 
@@ -2107,7 +2179,11 @@ class Backtester {
     List<Candle> c1,
     List<Candle> c15, {
     int step = 1,
-    int maxTrades = 200,
+    // A fixed 1.05% target resolves in a few bars, so a 12000-bar sample can
+    // produce thousands of trades. The cap is high on purpose: the point of a
+    // deeper sample is a bigger n, and the streak/win-rate numbers only mean
+    // something with it.
+    int maxTrades = 2000,
   }) {
     final trades = <BacktestTrade>[];
     final n = c15.length;
@@ -3265,11 +3341,13 @@ class _BTS extends State<BacktestScreen> {
     });
 
     try {
-      // ~40 days of 15M bars. 1000 bars was only ten days, which produced a
-      // handful of trades — too few to say anything about an edge.
-      final c4 = await MarketData.candles(symbol, '4h', 900);
-      final c1 = await MarketData.candles(symbol, '1h', 1200);
-      final c15 = await MarketData.candles(symbol, '15m', 4000);
+      // Deeper history: 12000 15M bars is ~125 days (4 months), so a fixed
+      // 1.05% target — which resolves quickly — produces hundreds of decided
+      // trades instead of a handful. Fetched in 1000-bar pages from Binance;
+      // the other feeds cap out lower and are used only as a fallback.
+      final c4 = await MarketData.candles(symbol, '4h', 1500);
+      final c1 = await MarketData.candles(symbol, '1h', 3000);
+      final c15 = await MarketData.candles(symbol, '15m', 12000);
       if (!mounted) return;
 
       setState(() => _msg = 'Simulating ${c15.length} bars...');
@@ -3378,25 +3456,69 @@ class _BTS extends State<BacktestScreen> {
   List<Widget> _report(BacktestResult r) {
     final n = r.trades.length;
     final good = r.totalR >= 0;
+    // A fixed target makes the win rate look great while the R multiple can be
+    // negative. Both numbers are printed, plus the R:R that connects them.
+    final rr = r.avgRR;
+    final be = r.breakEvenWinRate;
+    final winOk = r.closed >= 20 && r.winRate > be;
+    final costTotal = r.totalRAfterCost(kCostPct);
+    final costWin = r.winRateAfterCost(kCostPct);
     return <Widget>[
-      _statCard('Win rate', '${r.winRate.toStringAsFixed(1)}%',
-          r.closed < 20 ? K.muted : (r.winRate >= 50 ? K.green : K.orange)),
-      const SizedBox(height: 6),
+      Row(
+        children: <Widget>[
+          Expanded(
+            child: _miniStat(
+              'Win rate',
+              '${r.winRate.toStringAsFixed(1)}%',
+              r.closed < 20 ? K.muted : (winOk ? K.green : K.orange),
+              sub: 'breakeven ${be.toStringAsFixed(1)}%',
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: _miniStat(
+              'Total R',
+              '${r.totalR >= 0 ? '+' : ''}${r.totalR.toStringAsFixed(2)}R',
+              good ? K.green : K.red,
+              sub: 'avg ${r.avgR.toStringAsFixed(2)}R',
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: _miniStat(
+              'R:R',
+              rr.toStringAsFixed(2),
+              rr >= 1 ? K.green : K.red,
+              sub: 'fixed ${kTpPct.toStringAsFixed(2)}% TP',
+            ),
+          ),
+        ],
+      ),
+      const SizedBox(height: 8),
       Text(
-        r.closed < 20
-            ? 'Sample choto: matro ${r.closed} ta trade nishpotti hoyeche '
-                '(${r.open} ta OPEN). Eta diye strategy judge kora jabe na.'
-            : r.totalR > 0
-                ? '${r.closed} ta nishpotti trade, total ${r.totalR.toStringAsFixed(2)}R '
-                    '— positive expectation.'
-                : '${r.closed} ta nishpotti trade, total ${r.totalR.toStringAsFixed(2)}R '
-                    '— ei sample e labh nei.',
+        r.closed == 0
+            ? 'Ei sample e kono trade nishpotti hoy nai — kichu bola jabe na.'
+            : '${r.closed} ta nishpotti trade. Win rate ${r.winRate.toStringAsFixed(1)}% '
+                '(${r.wins} TP / ${r.losses} SL), kintu protiti trade e reward:risk '
+                'matro ${rr.toStringAsFixed(2)} — tai ${be.toStringAsFixed(1)}% '
+                'win rate chara total R positive hobe na. '
+                '${kCostPct.toStringAsFixed(2)}% khoroch dhorle '
+                '${costTotal.toStringAsFixed(2)}R (win rate ${costWin.toStringAsFixed(1)}%).',
         style: TextStyle(
-          color: r.closed < 20 ? K.orange : (r.totalR > 0 ? K.green : K.red),
+          color: r.closed < 20 ? K.orange : (good ? K.green : K.red),
           fontSize: 11,
-          height: 1.4,
+          height: 1.45,
         ),
       ),
+      if (r.closed < 20) ...<Widget>[
+        const SizedBox(height: 6),
+        Text(
+          'Sample choto: matro ${r.closed} ta trade nishpotti hoyeche '
+          '(${r.open} ta OPEN). Eta diye strategy judge kora jabe na — '
+          'aro purono candle dorkar.',
+          style: const TextStyle(color: K.orange, fontSize: 11, height: 1.4),
+        ),
+      ],
       const SizedBox(height: 10),
       Row(
         children: <Widget>[
@@ -3412,9 +3534,9 @@ class _BTS extends State<BacktestScreen> {
           const SizedBox(width: 8),
           Expanded(
             child: _miniStat(
-              'Total R',
-              '${r.totalR >= 0 ? '+' : ''}${r.totalR.toStringAsFixed(2)}R',
-              good ? K.green : K.red,
+              'Khoroch por', '${costTotal >= 0 ? '+' : ''}${costTotal.toStringAsFixed(2)}R',
+              costTotal >= 0 ? K.green : K.red,
+              sub: '${kCostPct.toStringAsFixed(2)}% fee',
             ),
           ),
         ],
@@ -3471,9 +3593,24 @@ class _BTS extends State<BacktestScreen> {
             Text(
               'Win rate ${r.winRate.toStringAsFixed(0)}% mane ${r.closed} ta '
               'nishpotti trade er ${r.wins} ta TP hit koreche. '
-              'Total R ${r.totalR.toStringAsFixed(2)} — win rate na, ei '
-              'number ta dekh.',
+              'TP fixed ${kTpPct.toStringAsFixed(2)}%, SL structure theke — '
+              'tai reward:risk ${rr.toStringAsFixed(2)} ar breakeven win rate '
+              '${be.toStringAsFixed(1)}%. Ei dutor tulonai trade ta labh na '
+              'lokshan.',
               style: const TextStyle(color: K.muted, fontSize: 11, height: 1.4),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Khoroch (${kCostPct.toStringAsFixed(2)}% fee+spread): '
+              '${costTotal >= 0 ? '+' : ''}${costTotal.toStringAsFixed(2)}R, '
+              'win rate ${costWin.toStringAsFixed(1)}%. '
+              '${r.invertedTrades > 0 ? '${r.invertedTrades} ta trade e SL TP er cheye kache chilo — oigulo bad deya uchit. ' : ''}'
+              '${r.invertedTrades == 0 && r.closed > 0 ? 'Protiti trade e risk >= target, tai TP agey chute pare. ' : ''}',
+              style: TextStyle(
+                color: costTotal >= 0 ? K.green : K.orange,
+                fontSize: 11,
+                height: 1.4,
+              ),
             ),
           ],
         ),

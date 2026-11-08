@@ -23,3 +23,6 @@ analysis_options.yaml
 .idea/
 .vscode/
 .DS_Store
+
+# Python bytecode from the measurement mirror
+tool/mirror/__pycache__/
