@@ -199,3 +199,61 @@ series, exact match) and sped up from 29 s to 4 s per walk. `measure.py` /
 `measure4.py` / `measure5.py` are the drivers. No exchange access here (only
 GitHub hosts are reachable), so all of it is synthetic — it proves a change is
 not broken, not that it is profitable. That caveat applies to every number above.
+
+
+---
+
+## 11. v7 · tp1.05 — fixed 1.05% target (2026-11-08)
+
+**Asked:** "Backtest korar sumy ... real market takhe data niba ... just t.p rakhba 1.05% ...
+onuck gula candle er data use korba jeno ami proti tah test er e valo akta result pai".
+Chosen: **TP fixed 1.05%, SL unchanged**, and show **win rate and total R both**.
+
+### What changed
+
+| change | value |
+|---|---|
+| take profit | fixed `kTpPct = 1.05%` from entry (was 15M swing / 2R) |
+| stop | **unchanged** — OB/FVG/swing + 0.25 x ATR(1H) |
+| new guard | a trade whose stop is **closer than the target** is rejected (it can only lose) |
+| backtest history | 15M 4000 → **12000 bars (~125 days)**, 4H 1500, 1H 3000 |
+| maxTrades | 200 → 2000 (a deeper sample is pointless if it is truncated) |
+| report | win rate **and** total R side by side, plus R:R, break-even win rate, and the result after 0.25% fees+spread |
+
+### Measured BEFORE shipping (`tool/mirror/measure_tp.py`, synthetic, paired, identical candles)
+
+12 series x 4 regimes, walk-forward:
+
+| target | trades | WR | totalR |
+|---|---|---|---|
+| 15M swing / 2R (old) | 241 | 38.9% | **+13.4** |
+| **fixed 1.05%** | 643 | **75.6%** | **−8.4** |
+| fixed 0.50% | 989 | 85.7% | −9.2 |
+| fixed 2.00% | 416 | 66.4% | +0.1 |
+
+**The win rate goes up and the money goes down.** A fixed target does not change
+the stop, so the reward:risk is decided by the stop distance:
+
+| ATR(1H) | risk | R:R at 1.05% TP | break-even WR |
+|---|---|---|---|
+| 0.45% | 0.54% | 1.94 | 34.0% |
+| 0.90% | 1.08% | 0.97 | 50.7% |
+| 1.80% | 2.16% | **0.49** | **67.3%** |
+| 3.00% | 3.60% | 0.29 | 77.4% |
+
+On a coin with ATR(1H) ≈ 1.8% the trade needs a 67.3% win rate just to break
+even, and with 0.25% fees it needs even more. The screen therefore prints the
+break-even rate next to the win rate; a 75% win rate at R:R 0.49 is a losing
+system and the report says so in words.
+
+Note the guard matters: without it, any trade whose stop was tighter than 1.05%
+is a certain loss that still shows up as a trade. It is now rejected before it
+is reported.
+
+### Real market data
+
+The backtest already pulls **live** Binance klines (paged, 1000 rows per
+request) — there is no synthetic data in the app path. It cannot be measured
+from this sandbox (only GitHub hosts are reachable, and Binance answers 451 from
+this IP range), so every number above is from the synthetic mirror. The device
+run is the missing piece, as always.

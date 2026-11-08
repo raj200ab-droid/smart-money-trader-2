@@ -6,7 +6,7 @@ before touching anything. If something here conflicts with the code, the code
 wins — then update this file.
 
 Last updated: 2026-11-08 · branch `arena/5182e84b-smart-money-trader-2` ·
-build `v6 · unify` / `6.0.0+6` · `lib/main.dart` ≈ 3600 lines ·
+build `v7 · tp1.05` / `7.0.0+7` · `lib/main.dart` ≈ 3600 lines ·
 PR #1 merged; this branch is the 300-coin work
 
 ---
@@ -188,6 +188,22 @@ that `multiTF` never read, and that EQH/EQL was display-only. Both were real.
 `/home/user/smt-verify/mirror.py` is the Python mirror again (the old `smt-mirror`
 was gone). Fix `swings()` if it ever drifts — it is verified against the naive
 form.
+
+## 8d. v7 · tp1.05 — fixed 1.05% target (2026-11-08)
+
+Requested: real data, TP = 1.05% only, more candles, "good result every test".
+
+- TP is now `kTpPct = 1.05%` from entry for **every** signal (scan and backtest).
+  **The stop is unchanged**, so R:R is set by the stop, not by the target.
+- trades whose stop is closer than the target are **rejected** (guaranteed loss).
+- backtest: 12000 15M bars (~125 days), 4H 1500, 1H 3000, maxTrades 2000.
+- report prints win rate **and** total R, plus R:R, break-even WR, and the
+  result after 0.25% costs.
+
+Measured on the mirror **before** shipping: 643 trades, **75.6% win rate,
+−8.4R**. The win rate rose and the expectancy went negative — NOTES.md §11 has
+the table and the arithmetic. Do not "fix" this by raising the target without
+measuring; the same table shows 2.0% is only break-even.
 
 ## 9. Open items
 
