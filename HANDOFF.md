@@ -6,7 +6,7 @@ before touching anything. If something here conflicts with the code, the code
 wins — then update this file.
 
 Last updated: 2026-11-08 · branch `arena/5182e84b-smart-money-trader-2` ·
-build `v8 · swingTP` / `8.0.0+8` · `lib/main.dart` ≈ 3600 lines ·
+build `v9 · diag` / `9.0.0+9` · `lib/main.dart` ≈ 3600 lines ·
 PR #1 merged; this branch is the 300-coin work
 
 ---
@@ -214,6 +214,19 @@ break-even + cost), and `tool/mirror/` in the repo.
 
 Justification for the revert is the paired table in NOTES §11: 38.9% WR /
 +13.4R with the swing target vs 75.6% WR / −8.4R with the fixed one.
+
+## 8f. v9 · diag — two bugs found from a device screenshot (2026-11-09)
+
+- **OKX reported BASE volume** in `volCcy24h` while `_isTradable` compares
+  against a 5M *USDT* floor. With Binance geo-blocked the app falls back to OKX,
+  and a "300 coin" scan came back with **35**. Fixed by converting to quote.
+- **The structure floor vetoed passing scores silently**: near-miss cards read
+  `score 55/40` with no signal. Measured: the floor kills **39% (174/449)** of
+  score-passing setups. The trace now names the gate. **The floor is kept** —
+  it is the fix for the all-SELL bug — and the user wants device numbers before
+  touching it.
+- A universe under 120 coins now says so on screen, with
+  `raw -> tradable -> picked`.
 
 ## 9. Open items
 

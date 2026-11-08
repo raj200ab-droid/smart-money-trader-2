@@ -283,3 +283,47 @@ the same candles went from **38.9% WR / +13.4R** (swing target) to
 table.
 
 Build `v8 · swingTP` / `8.0.0+8`.
+
+
+---
+
+## 13. v9 · diag — the screenshot that exposed two real bugs (2026-11-09)
+
+**Device evidence (v5 · 300 build):** `35 / 35` coins scanned, and near-miss
+cards reading `score 55/40` with no signal. Both were real.
+
+### Bug A — OKX quote volume (the reason a 300-coin scan said 35)
+
+Every feed's tickers go through `_isTradable`, which requires
+`quoteVolume > 5,000,000` **USDT**. Binance, Bybit and MEXC all report quote
+volume. **OKX reports `volCcy24h` in BASE units** (BTC, not USDT) — and when
+Binance is geo-blocked the app falls back to OKX. So 1000 BTC *price* is
+~100M USDT but 1000 XRP *price* is ~2,000 USDT, and the filter removed almost
+every pair. Fixed: `volCcy24h * price`, or `vol24h` when present.
+
+This had been wrong since the fallback chain was written; it only became visible
+once the universe grew and the number on screen could be compared with 300.
+
+### Bug B — a passing score with no explanation
+
+`multiTF` has four gates: score >= threshold, 4H bias, live 15M trigger, and
+`!bullBlocked/!bearBlocked` (the structure floor added for bug #3). The near-miss
+trace printed the score and the zone penalty but **never mentioned the floor**,
+so a card could say `score 55/40` and show no signal — indistinguishable from a
+bug. Measured on synthetic data: the floor silently kills **39% (174/449)** of
+setups whose score already passed (SELL side; the BUY side does not reach the
+gate in that generator's regimes). The trace now names the gate:
+
+- `gate: 15M trigger nai`
+- `gate: upore bearish 1H OB block korche`
+- `gate: niche bullish 1H OB block korche`
+- `gate: dui dikei score soman/kom`
+
+The floor **stays**: it is the fix for "every signal was a SELL". The user chose
+to measure on the device before loosening it, which is the right order.
+
+### Bug C (visibility) — a small universe was silent
+
+The status line now shows `raw tickers -> tradable -> picked` while scanning and
+warns `Sotorkota: matro N coin — <feed> puro list dey nai` below 120 coins. A
+quiet market and a broken feed must not look the same.
