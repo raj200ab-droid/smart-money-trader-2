@@ -21,11 +21,11 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v8 · swingTP';
+const String kBuild = 'v9 · diag';
 
 /// App version reported to Android, so the installed build is identifiable
 /// from Settings without opening the app.
-const String kVersionName = '8.0.0+8';
+const String kVersionName = '9.0.0+9';
 
 
 /// Round-trip fee + spread assumption used only by the backtest report, in
@@ -369,6 +369,13 @@ class MarketData {
   /// Feed name that produced the last successful scan (shown in the UI).
   static String activeFeed = '';
 
+  /// Raw ticker rows the feed returned and how many survived `_isTradable`,
+  /// so a small universe (e.g. 35 coins instead of 300) can be explained
+  /// instead of looking like a broken scanner.
+  static int lastRawTickers = 0;
+  static int lastTradable = 0;
+  static int lastPicked = 0;
+
   /// Feeds that just failed are skipped for a few minutes so a blocked
   /// exchange cannot add 15s of timeout to every one of the ~300 requests.
   static final Map<String, DateTime> _downUntil = <String, DateTime>{};
@@ -501,6 +508,8 @@ class MarketData {
       try {
         final all = await _tickers(feed);
         final picked = _pick(all, gainers, losers);
+        lastTradable = all.length;
+        lastPicked = picked.length;
         if (picked.isEmpty) {
           errors.add('${feed.name}: empty');
           _markDown(feed);
@@ -770,6 +779,7 @@ class MarketData {
     for (final base in _binanceMirrors) {
       try {
         final data = await _getJson('$base/ticker/24hr') as List<dynamic>;
+        lastRawTickers = data.length;
         final list = data
             .map((e) => CoinData.fromJson(e as Map<String, dynamic>))
             .where(_isTradable)
@@ -789,6 +799,7 @@ class MarketData {
     ) as Map<String, dynamic>;
     final result = resp['result'] as Map<String, dynamic>?;
     final rows = (result?['list'] as List<dynamic>?) ?? <dynamic>[];
+    lastRawTickers = rows.length;
     final out = <CoinData>[];
     for (final row in rows) {
       final m = row as Map<String, dynamic>;
@@ -821,6 +832,7 @@ class MarketData {
       'https://www.okx.com/api/v5/market/tickers?instType=SPOT',
     ) as Map<String, dynamic>;
     final rows = (resp['data'] as List<dynamic>?) ?? <dynamic>[];
+    lastRawTickers = rows.length;
     final out = <CoinData>[];
     for (final row in rows) {
       final m = row as Map<String, dynamic>;
@@ -828,13 +840,20 @@ class MarketData {
       if (!inst.endsWith('-USDT')) continue;
       final open = _d(m['open24h']);
       final px = _d(m['last']);
+      // OKX `volCcy24h` is BASE-currency volume (BTC, not USDT). Comparing it
+      // against a 5M USDT floor silently removed almost every pair, which is
+      // how a 300-coin scan became 35 coins on the device. Multiply by price to
+      // get quote volume; `vol24h` (already quote) is used when present.
+      final volCcy = _d(m['volCcy24h']);
+      final volQuote = _d(m['vol24h']);
+      final quoteVolume = volQuote > 0 ? volQuote : volCcy * px;
       final coin = CoinData(
         symbol: '${inst.split('-').first}USDT',
         lastPrice: px,
         priceChangePercent: open > 0 ? (px - open) / open * 100 : 0,
         highPrice: _d(m['high24h']),
         lowPrice: _d(m['low24h']),
-        quoteVolume: _d(m['volCcy24h']),
+        quoteVolume: quoteVolume,
       );
       if (_isTradable(coin)) out.add(coin);
     }
@@ -846,6 +865,7 @@ class MarketData {
     final data = await _getJson(
       'https://api.mexc.com/api/v3/ticker/24hr',
     ) as List<dynamic>;
+    lastRawTickers = data.length;
     final out = <CoinData>[];
     for (final row in data) {
       final m = row as Map<String, dynamic>;
@@ -1779,6 +1799,25 @@ class Engine {
                 : '15M trigger nei')
         ..add('score ${(buy > sell ? buy : sell).round()}/${threshold.round()}'
             '${zoneNow == 'Premium' || zoneNow == 'Discount' ? ' • $zoneNow penalty' : ''}');
+      // The structure floor can veto a setup whose score already passed, and
+      // the trace used to stay silent about it: the card read "score 55/40"
+      // with no explanation, which looks like a bug on the device. Say which
+      // gate actually rejected the trade.
+      final bool scorePass = (bull4 && buy >= threshold) ||
+          (bear4 && sell >= threshold);
+      if (scorePass) {
+        if (bull4 && !trigBuy) {
+          trace.add('gate: 15M trigger nai');
+        } else if (bear4 && !trigSell) {
+          trace.add('gate: 15M trigger nai');
+        } else if (bull4 && bullBlocked) {
+          trace.add('gate: upore bearish 1H OB block korche');
+        } else if (bear4 && bearBlocked) {
+          trace.add('gate: niche bullish 1H OB block korche');
+        } else if (buy <= sell) {
+          trace.add('gate: dui dikei score soman/kom');
+        }
+      }
     }
 
     if (buy >= threshold &&
@@ -2383,8 +2422,13 @@ class _HS extends State<HomeScreen> {
       setState(() {
         _feed = MarketData.activeFeed;
         _total = coins.length;
-        _msg = '${coins.length} coins found '
-            '(${MarketData.activeFeed}). Analyzing...';
+        // Say where the universe came from. 35 coins out of a 300-coin scan is
+        // a data problem, not a signal problem, and the numbers that prove it
+        // belong on the screen: raw tickers -> tradable -> picked.
+        final raw = MarketData.lastRawTickers;
+        final tradable = MarketData.lastTradable;
+        _msg = '${coins.length} coins found (${MarketData.activeFeed}) '
+            '[$raw ticker → $tradable tradable]. Analyzing...';
       });
 
       if (coins.isEmpty) {
@@ -2554,12 +2598,18 @@ class _HS extends State<HomeScreen> {
                 'mile nai';
         final young =
             _tooYoung > 0 ? ' • $_tooYoung notun coin (4H history kom)' : '';
+        // A small universe is worth shouting about: it means the exchange did
+        // not hand over its full ticker list, not that the market is empty.
+        final small = _total < 120
+            ? ' • Sotorkota: matro $_total coin — '
+                '${MarketData.activeFeed} puro list dey nai'
+            : '';
         _msg = _signals.isEmpty
-            ? 'Kono setup nei ekhon ($_feed) — $why.$young '
+            ? 'Kono setup nei ekhon ($_feed) — $why.$young$small '
                 '5 min por auto refresh.'
             : '$strict signal • $watch watch • $radar radar ($_feed)'
                 '${_failed > 0 ? ' • $_failed coin skip' : ''}$young'
-                '$cacheNote';
+                '$small$cacheNote';
       });
     } catch (e) {
       if (!mounted || id != _scanId) return;
