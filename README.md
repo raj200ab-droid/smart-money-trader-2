@@ -107,11 +107,14 @@ being folded into the win rate. The backtest pulls ~40 days of 15M history by
 paging Binance klines (1000 rows per request) and degrades the 4H bias window
 from 400 to 200 to 120 bars when a listing is younger than that.
 
-Read the **total R**, not the win rate. The take profit is the 15M swing level
-(2R when no swing sits beyond entry) and the stop is structure-based, so the two
-are linked — but the screen still prints the win rate, the total R, the implied
-R:R and the break-even win rate together, plus the result after 0.25%
-fees+spread, because a high win rate on its own is not a result. A fixed 1.05%
+Read the **total R**, not the win rate. The take profit is the 15M swing level,
+used only when it is worth at least **1.5R** (otherwise the target falls back to
+2R), and the stop is structure-based. That floor exists because live data
+shipped a SELL risking 3.50% for a 0.98% target (RR 1:0.28) and another risking
+4.54% for 0.51% (RR 1:0.11) — trades that needed a 78–90% hit rate just to break
+even. The screen prints the win rate, the total R, the implied R:R and the
+break-even win rate together, plus the result after 0.25% fees+spread, because a
+high win rate on its own is not a result (NOTES §14). A fixed 1.05%
 target was tried and measured: it lifted the win rate from 38.9% to 75.6% and
 turned +13.4R into −8.4R, so it was removed again (NOTES §11–12).
 

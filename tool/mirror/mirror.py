@@ -16,6 +16,8 @@ SWING_LEN = 50
 INTERNAL_LEN = 5
 STRICT = 60.0
 WATCH = 40.0
+MIN_RR = 1.5
+MAX_STOP_PCT = 8.0    # measured: capping at 2.5% cut the only net-positive bucket
 
 
 # --------------------------------------------------------------------- helpers
@@ -408,14 +410,18 @@ def multi_tf(c4, c1, c15, relaxed=False, tp_mode='swing', tp_pct=1.05):
             if sl >= entry:
                 sl = entry - atr1
             risk = entry - sl
-            if risk <= 0 or risk / entry > 0.08:
+            if risk <= 0 or risk / entry > MAX_STOP_PCT / 100.0:
                 return None
             if tp_mode == 'pct':
                 tp = entry * (1 + tp_pct / 100.0)
-            elif t15['swingHigh'] and t15['swingHigh']['price'] > entry * 1.005:
-                tp = t15['swingHigh']['price']
             else:
-                tp = entry + risk * 2
+                swing = t15['swingHigh']['price'] if t15['swingHigh'] else -1e18
+                # OLD dart rule (v9, shipped): any swing beyond entry, >= 0.5%
+                # away. That is what produced SOL RR 1:0.28 and ETH RR 1:0.11.
+                # MIN_RR then enforces the v10 fix on top of the same rule.
+                if swing <= entry * 1.005:
+                    swing = -1e18
+                tp = swing if swing >= entry + risk * MIN_RR else entry + risk * 2
         else:
             if sell_ob:
                 mid = (sell_ob['high'] + sell_ob['low']) / 2
@@ -433,14 +439,15 @@ def multi_tf(c4, c1, c15, relaxed=False, tp_mode='swing', tp_pct=1.05):
             if sl <= entry:
                 sl = entry + atr1
             risk = sl - entry
-            if risk <= 0 or risk / entry > 0.08:
+            if risk <= 0 or risk / entry > MAX_STOP_PCT / 100.0:
                 return None
             if tp_mode == 'pct':
                 tp = entry * (1 - tp_pct / 100.0)
-            elif t15['swingLow'] and t15['swingLow']['price'] < entry * 0.995:
-                tp = t15['swingLow']['price']
             else:
-                tp = entry - risk * 2
+                swing = t15['swingLow']['price'] if t15['swingLow'] else 1e18
+                if swing >= entry * 0.995:      # OLD dart rule, as shipped in v9
+                    swing = 1e18
+                tp = swing if swing <= entry - risk * MIN_RR else entry - risk * 2
         return {'direction': direction, 'entry': entry, 'sl': sl, 'tp': tp,
                 'score': score, 'tier': 'WATCH' if relaxed else 'STRICT',
                 'zone': zone_now}

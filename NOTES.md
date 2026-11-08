@@ -327,3 +327,93 @@ to measure on the device before loosening it, which is the right order.
 The status line now shows `raw tickers -> tradable -> picked` while scanning and
 warns `Sotorkota: matro N coin — <feed> puro list dey nai` below 120 coins. A
 quiet market and a broken feed must not look the same.
+
+## 14. v10 — the RR gate, and a stop cap that the data rejected
+
+Three defects showed up on the v9 device screenshot (2026-11-09 01:05), plus two
+carried over from the 00:55 shot.
+
+### Bug A — a SELL that risked 4.5% to make 0.5% (RR 1:0.11)
+
+The 15M swing was accepted as a target whenever it sat **beyond entry**, with no
+minimum size:
+
+```dart
+t15.swingLow != null && t15.swingLow!.price < entry * 0.995   // v9
+    ? t15.swingLow!.price : entry - risk * 2;
+```
+
+That is a 0.5% test, not a quality test. Live:
+
+| symbol | entry | SL | TP | risk | reward | RR |
+|---|---|---|---|---|---|---|
+| SOL (00:55) | 89.6100 | 92.7443 | 88.7300 | 3.50% | 0.98% | **1:0.28** |
+| ETH (01:05) | 2234.45 | 2335.94 | 2223.15 | 4.54% | 0.51% | **1:0.11** |
+
+Breakeven win rate for the ETH trade is ~90% before costs. Fixed with
+`kMinRR = 1.5`: the swing is used only if it is worth at least 1.5R, otherwise
+the target falls back to 2R.
+
+### The stop cap I proposed was wrong, and the measurement said so
+
+The first fix paired `kMinRR` with `kMaxStopPct = 2.5` on the reasoning that a
+15M trigger should not carry a 4.5% stop. Measured, 12 seeds x 4 regimes,
+closed trades only, `cost_r = 0.25 / stop_pct`:
+
+| bucket (v9 rule) | n | WR | gross | net |
+|---|---|---|---|---|
+| stop <= 2.5% | 71 | 26.8% | −5.4R | **−18.4R** |
+| stop 2.5 – 8% | 150 | 44.7% | +18.8R | **+9.8R** |
+
+The narrow-stop bucket is the losing one; the cap would have deleted the only
+net-positive bucket. Wider stops win because they are further from noise and
+because the fixed 0.25% fee is a smaller fraction of R. **The cap was reverted**
+— `0.08` is back in all three places.
+
+### What v10 actually changes, measured
+
+`tool/mirror/measure_v10_final.py`, old target rule vs `kMinRR = 1.5`, identical
+candles, 0.25% cost:
+
+| rule | n (closed) | WR | gross | net | minRR shipped |
+|---|---|---|---|---|---|
+| v9 (swing if beyond entry) | 208 | 35.1% | +7.2R | −13.7R | 0.52 |
+| v10 (`swing if >= 1.5R`) | 196 | 32.1% | +8.0R | −12.0R | 1.51 |
+
+v10 refuses 33 of 208 (16%) of the trades v9 would ship, and loses slightly less.
+Both are negative net of cost and every 95% CI straddles zero, so this is
+**not** a profitability claim — it is the removal of trades whose own arithmetic
+demanded a 78–90% win rate. The honest statement is: *no trade can now be
+shipped that needs an unrealistic hit rate to break even.*
+
+### Bug B — every card said `BOS 대 Unknown`
+
+`zoneOf` returns `'Unknown'` when `premium == 0`, and `premium` was set only
+when **both** a confirmed swing high and a confirmed swing low existed. On a
+short 1H window (or when one pivot is missing) the range collapses to zero and
+the label degrades. Every card in both screenshots showed it.
+
+Fix: when no swing pair exists but the window has >= 20 bars, fall back to the
+window's own high/low for premium/equilibrium/discount. A range always exists;
+"Unknown" now means what it says.
+
+### Bug C — `4H cache 0/0+36`, every scan a full refetch
+
+The cache stores `fresh.length - 1` bars (closed only, the forming bar is
+rebuilt from 15M). The hit test then demanded `merged.length >= lim`, i.e. the
+cache had to return the same count as the exchange while structurally holding
+one bar fewer. It could never pass. Every scan refetched 36 x 600 4H bars.
+
+Fix: a hit is `merged.length >= lim - 1`. The engine's window is 400 bars; one
+bar short of a 600-bar request is not a shortfall.
+
+### Still open — why 36 coins and not 300
+
+v5 showed 35, v9 showed 38, v10 shows 36. Three runs, three days, always ~36,
+never near the 300 that `_pick(gainers: 150, losers: 150)` allows. The scan
+status line proves the funnel only while scanning; the Done state did not.
+
+v10 adds the funnel to the Done state:
+`raw ticker → tradable → picked`. Until that number comes back from the device,
+the cause is **not known** — a short ticker list and our own 5M USDT floor look
+identical from here.

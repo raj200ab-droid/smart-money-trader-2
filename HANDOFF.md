@@ -228,6 +228,29 @@ Justification for the revert is the paired table in NOTES §11: 38.9% WR /
 - A universe under 120 coins now says so on screen, with
   `raw -> tradable -> picked`.
 
+## 8g. v10 · rrGate — a trade may no longer risk more than it can win (2026-11-09)
+
+Two device screenshots (00:55 and 01:05) shipped trades whose own arithmetic was
+impossible: SOL SELL risk 3.50% / reward 0.98% (**RR 1:0.28**) and ETH SELL risk
+4.54% / reward 0.51% (**RR 1:0.11**). Breakeven for the ETH trade is a ~90% win
+rate. The v9 target rule asked only "is the 15M swing beyond entry?", a 0.5%
+test, not a quality test.
+
+- **`kMinRR = 1.5`**: the swing target is accepted only at >= 1.5R, else 2R.
+  Measured (`measure_v10_final.py`, 0.25% cost): v9 −13.7R net over 208 closed
+  trades, v10 −12.0R over 196. Both negative, all CIs straddle zero — the claim
+  is only that 33 trades (16%) needing a 78–90% hit rate are now refused.
+- **A 2.5% stop cap was proposed and then measured and reverted.** The narrow
+  stop bucket is the *losing* one (`stop<=2.5%`: net −18.4R; `2.5–8%`: +9.8R).
+  The 8% bound is back in all three places.
+- **`BOS 대 Unknown` on every card**: `premium` was only set when a confirmed
+  swing high *and* low existed. Fallback to the window range at >= 20 bars.
+- **`4H cache 0/0+36`**: the hit test demanded `merged.length >= lim` while the
+  cache structurally holds one bar fewer. Now `>= lim - 1`; the cache can
+  actually warm and a scan stops refetching 36 x 600 4H bars.
+- Done state now prints `raw ticker → tradable → picked`, because why the
+  universe is 36 and not 300 is still **unexplained**.
+
 ## 9. Open items
 
 1. **New repo blocked.** He created `smart-money-new-version-` (private). The
@@ -239,8 +262,10 @@ Justification for the revert is the paired table in NOTES §11: 38.9% WR /
 2. **PR #1 is still open**, so `NOTES.md` / `HANDOFF.md` are only on the branch —
    `main` does not have them. He asked why "the note is not copying"; the answer
    is: not merged yet.
-3. **Device numbers for `v5 · 300`** — scan time, `4H cache hits/hits+misses`,
-   STRICT/WATCH/RADAR counts. Nothing has been reported from a phone yet.
+3. **Device numbers** — the funnel line (`raw → tradable → picked`) from a v10
+   Done-state screenshot, plus scan time and `4H cache hits`. Still nothing
+   reported from a phone, so the 36-coin cause is still unknown, and no engine
+   tuning (score, floor, stops) can be justified without it.
 4. Offered, not built: STRICT-only toggle, breakeven/trailing stops,
    liquidity-based TP.
 

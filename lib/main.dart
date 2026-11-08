@@ -21,12 +21,19 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v9 · diag';
+const String kBuild = 'v10 · rrGate';
 
 /// App version reported to Android, so the installed build is identifiable
 /// from Settings without opening the app.
-const String kVersionName = '9.0.0+9';
+const String kVersionName = '10.0.0+10';
 
+
+/// Minimum reward:risk a trade must be able to offer. The structure target
+/// (15M swing) is accepted only at or above this; otherwise the target falls
+/// back to 2R. Measured reason: a live SOL SELL shipped with risk 3.5% and
+/// reward 0.98% (RR 1:0.28) because the old check only asked whether the swing
+/// sat beyond entry.
+const double kMinRR = 1.5;
 
 /// Round-trip fee + spread assumption used only by the backtest report, in
 /// percent of entry. 0.25% is roughly Binance spot taker (0.1% x 2) plus a
@@ -659,7 +666,12 @@ class MarketData {
       final closed = _cache4h[sym];
       if (closed != null && _cache4hFresh(sym)) {
         final merged = _merge4h(closed, liveFrom, lim);
-        if (merged.length >= lim) {
+        // The cache holds only CLOSED bars, so it is by construction one bar
+        // short of what the exchange returns. Demanding >= lim here made every
+        // single scan a miss (device: "4H cache 0/0+36"), which refetched
+        // 36 x 600 bars every five minutes. A cache that can still satisfy the
+        // engine's window is a hit.
+        if (merged.length >= lim - 1) {
           cacheHits++;
           return merged;
         }
@@ -1516,6 +1528,21 @@ class Engine {
       premium = 0.95 * up + 0.05 * dn;
       equilibrium = 0.525 * up + 0.475 * dn;
       discount = 0.95 * dn + 0.05 * up;
+    } else if (c.length >= 20) {
+      // No confirmed swing pair yet (short window, or one pivot missing).
+      // Fall back to the window's own range so the card stops printing
+      // "BOS 대 Unknown": a range is always available from the candles.
+      var hi = c.first.high;
+      var lo = c.first.low;
+      for (final k in c) {
+        if (k.high > hi) hi = k.high;
+        if (k.low < lo) lo = k.low;
+      }
+      if (hi > lo) {
+        premium = 0.95 * hi + 0.05 * lo;
+        equilibrium = 0.525 * hi + 0.475 * lo;
+        discount = 0.95 * lo + 0.05 * hi;
+      }
     }
 
     final px = c.last.close;
@@ -1848,13 +1875,14 @@ class Engine {
       if (sl >= entry) sl = entry - atr1;
       final risk = entry - sl;
       if (risk <= 0 || risk / entry > 0.08) return null;
-      // Target: the 15M swing high when it is beyond entry (structure gives the
-      // exit), otherwise a fixed 2R. Restored after the fixed-percent target
-      // was measured to lose money (NOTES.md section 11).
-      final target =
-          t15.swingHigh != null && t15.swingHigh!.price > entry * 1.005
-              ? t15.swingHigh!.price
-              : entry + risk * 2;
+      // Target: the 15M swing high only when it is worth at least 1.5R,
+      // otherwise 2R. A swing that sits just above entry is not an objective,
+      // it is noise: live data produced a BUY with risk 3.5% and reward 0.98%
+      // (RR 1:0.28) because the old test only asked "is it beyond entry?".
+      // A trade must not risk more than it can win.
+      final minTarget = entry + risk * kMinRR;
+      final swingTarget = t15.swingHigh?.price ?? double.negativeInfinity;
+      final target = swingTarget >= minTarget ? swingTarget : entry + risk * 2;
 
       if (t15.breakAge > 2) {
         bC.add('15M bullish break ${t15.breakAge} bar age');
@@ -1913,10 +1941,9 @@ class Engine {
       if (sl <= entry) sl = entry + atr1;
       final risk = sl - entry;
       if (risk <= 0 || risk / entry > 0.08) return null;
-      final target =
-          t15.swingLow != null && t15.swingLow!.price < entry * 0.995
-              ? t15.swingLow!.price
-              : entry - risk * 2;
+      final maxTarget = entry - risk * kMinRR;
+      final swingTarget = t15.swingLow?.price ?? double.infinity;
+      final target = swingTarget <= maxTarget ? swingTarget : entry - risk * 2;
 
       if (t15.breakAge > 2) {
         sC.add('15M bearish break ${t15.breakAge} bar age');
@@ -2600,9 +2627,15 @@ class _HS extends State<HomeScreen> {
             _tooYoung > 0 ? ' • $_tooYoung notun coin (4H history kom)' : '';
         // A small universe is worth shouting about: it means the exchange did
         // not hand over its full ticker list, not that the market is empty.
+        final raw = MarketData.lastRawTickers;
+        final tradable = MarketData.lastTradable;
+        // A small universe must name its own funnel, otherwise the only way to
+        // tell "exchange sent a short list" from "our own filter ate it" is a
+        // screenshot and a guess. raw is what the feed returned, tradable is
+        // after _isTradable (5M USDT floor), _total is after _pick.
         final small = _total < 120
             ? ' • Sotorkota: matro $_total coin — '
-                '${MarketData.activeFeed} puro list dey nai'
+                '$raw ticker → $tradable tradable → $_total picked'
             : '';
         _msg = _signals.isEmpty
             ? 'Kono setup nei ekhon ($_feed) — $why.$young$small '
