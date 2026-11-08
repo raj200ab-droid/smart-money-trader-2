@@ -383,6 +383,20 @@ class MarketData {
   static int lastTradable = 0;
   static int lastPicked = 0;
 
+  /// Feed each funnel number belongs to. A failed Binance attempt followed by a
+  /// working OKX scan used to leave Binance's raw count on screen next to OKX's
+  /// coin list.
+  static String lastFunnelFeed = '';
+
+  /// Cleared at the start of every scan so a stale number can never be read as
+  /// this scan's result.
+  static void resetFunnel() {
+    lastRawTickers = 0;
+    lastTradable = 0;
+    lastPicked = 0;
+    lastFunnelFeed = '';
+  }
+
   /// Feeds that just failed are skipped for a few minutes so a blocked
   /// exchange cannot add 15s of timeout to every one of the ~300 requests.
   static final Map<String, DateTime> _downUntil = <String, DateTime>{};
@@ -517,6 +531,7 @@ class MarketData {
         final picked = _pick(all, gainers, losers);
         lastTradable = all.length;
         lastPicked = picked.length;
+        lastFunnelFeed = feed.name;
         if (picked.isEmpty) {
           errors.add('${feed.name}: empty');
           _markDown(feed);
@@ -2437,6 +2452,7 @@ class _HS extends State<HomeScreen> {
         _biasNoSetup = 0;
         _tooYoung = 0;
         _nearMiss.clear();
+        MarketData.resetFunnel();
       });
     }
 
@@ -2629,12 +2645,17 @@ class _HS extends State<HomeScreen> {
         // not hand over its full ticker list, not that the market is empty.
         final raw = MarketData.lastRawTickers;
         final tradable = MarketData.lastTradable;
+        final funnelFeed = MarketData.lastFunnelFeed;
         // A small universe must name its own funnel, otherwise the only way to
         // tell "exchange sent a short list" from "our own filter ate it" is a
         // screenshot and a guess. raw is what the feed returned, tradable is
         // after _isTradable (5M USDT floor), _total is after _pick.
+        //
+        //   raw low          -> the feed sent a truncated list
+        //   raw high, tradable low -> our 5M floor ate it
+        //   tradable high, picked low -> _pick(gainers, losers) is the limit
         final small = _total < 120
-            ? ' • Sotorkota: matro $_total coin — '
+            ? ' • Sotorkota: matro $_total coin ($funnelFeed) — '
                 '$raw ticker → $tradable tradable → $_total picked'
             : '';
         _msg = _signals.isEmpty

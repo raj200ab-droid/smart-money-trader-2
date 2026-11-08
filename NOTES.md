@@ -417,3 +417,41 @@ v10 adds the funnel to the Done state:
 `raw ticker → tradable → picked`. Until that number comes back from the device,
 the cause is **not known** — a short ticker list and our own 5M USDT floor look
 identical from here.
+
+### Where the 300 coins actually go
+
+`_total` on screen is `coins.length`, i.e. the output of
+`_pick(all, gainers: 150, losers: 150)`, which is capped at **300 by design**
+(150 best gainers + 150 worst losers, deduped). So the ceiling is
+`min(tradable, 300)` and the funnel is:
+
+```
+/ticker/24hr  ~2800 rows
+  -> _isTradable   symbol endsWith USDT, not stablecoin/leveraged, lastPrice > 0,
+                   quoteVolume > 5,000,000 USDT        <- the only hard floor
+  -> _pick(150,150)                                   <- capped at 300
+  -> analysis loop (all coins, no further cap)
+```
+
+Seeing ~36 means the pool **entering** `_pick` was already ~36. `_pick` could
+not have caused it: with a healthy list it returns 150–300 depending on the
+market, never a flat 36 on three different days.
+
+Time is not the limit either. 300 coins = 900 klines requests; at 4–6 workers
+that is 68–202 s cold, 45–135 s on a warm 4H cache (after the v10 hit-test
+fix), inside the 5-minute refresh slot.
+
+The likely cause is the same class of bug as the v9 OKX one — a volume field
+that is not what the floor assumes — but on the Binance path the field goes
+straight through `double.parse(j['quoteVolume'])`, so it cannot silently
+degrade to zero; it would throw and fall through to the next mirror. That makes
+"the feed returned a short list" the leading suspicion, which the funnel line
+now settles on the device in one run:
+
+- `raw` low, `tradable` low → the exchange sent a truncated list
+- `raw` high, `tradable` low → our 5M floor is eating it
+- `tradable` high, `picked` low → `_pick` is the limit
+
+`resetFunnel()` now clears all three counters at the start of every scan and
+`lastFunnelFeed` records which exchange the numbers belong to, so a failed
+Binance attempt can no longer leave its raw count next to an OKX coin list.
