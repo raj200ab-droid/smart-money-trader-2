@@ -21,11 +21,11 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v12 · trust';
+const String kBuild = 'v12.1 · live';
 
 /// App version reported to Android, so the installed build is identifiable
 /// from Settings without opening the app.
-const String kVersionName = '12.0.0+14';
+const String kVersionName = '12.1.0+15';
 
 
 /// Minimum reward:risk a trade must be able to offer. The structure target
@@ -432,6 +432,10 @@ class MarketData {
   static int lastListed = 0;
   static int lastStrongPool = 0;
 
+  /// Rows the feed returned for symbols it no longer trades (delisted /
+  /// halted). Proves on screen that the exchange did send junk.
+  static int lastDeadSymbols = 0;
+
   /// Cleared at the start of every scan so a stale number can never be read as
   /// this scan's result.
   static void resetFunnel() {
@@ -442,6 +446,7 @@ class MarketData {
     lastStrong = 0;
     lastListed = 0;
     lastStrongPool = 0;
+    lastDeadSymbols = 0;
   }
 
   /// Feeds that just failed are skipped for a few minutes so a blocked
@@ -889,6 +894,25 @@ class MarketData {
     return _fetchCandles(sym, tf, lim, lockedToScanFeed: scan);
   }
 
+  /// A live 15M series must have a bar that closed recently. A delisted pair
+  /// (GALUSDT on Binance spot) still answers /klines — with bars from the day
+  /// it was delisted. The engine cannot tell the difference: five confirmations
+  /// computed on year-old candles look exactly like five on today's. So the
+  /// scan rejects any series whose newest bar is older than this.
+  static const Duration _maxBarAge = Duration(hours: 6);
+
+  /// True when [c] is a live series for [tf]: the newest bar must end within
+  /// [_maxBarAge]. 4H is given a whole bar plus slack because the bar that is
+  /// still forming is expected to be missing from the cache.
+  static bool isLive(List<Candle> c, String tf) {
+    if (c.isEmpty) return false;
+    final newestEnd = c.last.closeTime;
+    final age = DateTime.now()
+        .difference(DateTime.fromMillisecondsSinceEpoch(newestEnd));
+    final slack = tf == '4h' ? const Duration(hours: 10) : _maxBarAge;
+    return age < slack;
+  }
+
   static Future<List<Candle>> _fetchCandles(
     String sym,
     String tf,
@@ -1007,16 +1031,67 @@ class MarketData {
     'https://data-api.binance.vision/api/v3',
   ];
 
+  /// Symbols Binance itself reports as TRADING on spot.
+  ///
+  /// /ticker/24hr keeps returning rows for pairs that are no longer tradable
+  /// (and for delisted ones it serves the last snapshot), so a ticker list on
+  /// its own is not a list of live markets. /exchangeInfo is the authority: a
+  /// symbol is live only when status == 'TRADING' and it is not a leveraged
+  /// token. Cached for the process, and a failure to fetch it degrades to the
+  /// ticker list rather than killing the scan.
+  static Set<String>? _binanceTrading;
+
+  static Future<Set<String>> _binanceLiveSymbols() async {
+    final cached = _binanceTrading;
+    if (cached != null && cached.isNotEmpty) return cached;
+    Object? last;
+    for (final base in _binanceMirrors) {
+      try {
+        final data = await _getJson('$base/exchangeInfo') as Map<String, dynamic>;
+        final rows = (data['symbols'] as List<dynamic>?) ?? <dynamic>[];
+        final live = <String>{};
+        for (final r in rows) {
+          final m = r as Map<String, dynamic>;
+          if (m['status']?.toString() != 'TRADING') continue;
+          if (m['quoteAsset']?.toString() != 'USDT') continue;
+          if (m['isSpotTradingAllowed'] == false) continue;
+          live.add(m['symbol'].toString());
+        }
+        if (live.isNotEmpty) {
+          _binanceTrading = live;
+          return live;
+        }
+      } catch (e) {
+        last = e;
+      }
+    }
+    if (last != null) {
+      // Do not poison the cache: a transient failure must not shrink the next
+      // scan. Fall back to "no filter" and let the freshness check catch stale
+      // pairs instead.
+      return <String>{};
+    }
+    return <String>{};
+  }
+
   static Future<List<CoinData>> _binanceTickers() async {
     Object? last;
     for (final base in _binanceMirrors) {
       try {
         final data = await _getJson('$base/ticker/24hr') as List<dynamic>;
         lastRawTickers = data.length;
+        // Only symbols Binance calls TRADING. Without this the list contains
+        // pairs it no longer runs — GALUSDT being the live example: delisted
+        // from spot, still returned by /ticker/24hr, and it produced a STRICT
+        // BUY at 2.5420 while the real Binance chart the user opened showed
+        // GALA at 0.00153.
+        final live = await _binanceLiveSymbols();
         final list = data
             .map((e) => CoinData.fromJson(e as Map<String, dynamic>))
+            .where((c) => live.isEmpty || live.contains(c.symbol))
             .where(_isListed)
             .toList();
+        lastDeadSymbols = live.isEmpty ? 0 : data.length - live.length;
         if (list.isNotEmpty) return list;
       } catch (e) {
         last = e;
@@ -2630,6 +2705,10 @@ class _HS extends State<HomeScreen> {
   /// the wide universe reached into younger listings. They are still analysed —
   /// a shorter bias window is a weaker read, not a missing one.
   int _short4h = 0;
+
+  /// Coins whose series was too old to be a live market (delisted pairs still
+  /// answer /klines with historical bars).
+  int _delisted = 0;
   final List<String> _nearMiss = <String>[];
   int _scanId = 0;
   String _feed = '';
@@ -2667,6 +2746,7 @@ class _HS extends State<HomeScreen> {
         _biasNoSetup = 0;
         _tooYoung = 0;
         _short4h = 0;
+        _delisted = 0;
         _nearMiss.clear();
         MarketData.resetFunnel();
       });
@@ -2761,6 +2841,15 @@ class _HS extends State<HomeScreen> {
             final c1 = await MarketData.candles(sym, '1h', 500, scan: true);
 
             if (id != _scanId || !mounted) return;
+
+            // A delisted pair still serves history. Reject it here instead of
+            // scoring year-old candles as if they were today's.
+            if (!MarketData.isLive(c15, '15m') ||
+                !MarketData.isLive(c4, '4h') ||
+                !MarketData.isLive(c1, '1h')) {
+              if (mounted) setState(() => _delisted++);
+              return;
+            }
 
             List<Candle> tail(List<Candle> c, int n) =>
                 c.length <= n ? c : c.sublist(c.length - n);
@@ -2901,9 +2990,12 @@ class _HS extends State<HomeScreen> {
         final analysed = _total - _tooYoung - _failed;
         // listedPool is BEFORE the cap: it is the only number that says whether
         // the exchange sent a short list or our own floor ate it.
-        final funnel = ' • $funnelFeed $raw ticker → $listedPool listed '
+        final dead = MarketData.lastDeadSymbols;
+        final funnel = ' • $funnelFeed $raw ticker'
+            '${dead > 0 ? ' ($dead delisted)' : ''} → $listedPool listed '
             '($strongPool strong) → $_total picked → $analysed analysed'
-            '${_short4h > 0 ? ' ($_short4h short 4H)' : ''}';
+            '${_short4h > 0 ? ' ($_short4h short 4H)' : ''}'
+            '${_delisted > 0 ? ' ($_delisted stale data)' : ''}';
         final small = _total < 120
             ? ' • Sotorkota: matro $_total coin — exchange e eto USDT pair nei'
             : '';

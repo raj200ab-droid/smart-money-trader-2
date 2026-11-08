@@ -659,3 +659,51 @@ stop the quiet tier from masquerading as liquid:
 
 The engine itself is untouched: it still scores the setup the same way. What
 changes is the label the user acts on.
+
+## 18. v12.1 — GAL: the app was scanning a delisted pair
+
+The user caught this, not me: **GAL is not on Binance spot.** Searching "GAL" in
+the Binance app returns **GALA** at 0.00153. The scanner's GAL card showed
+2.5420 — Galxe, a different token on a different venue, and its BinanceUSDT pair
+was delisted from spot.
+
+The app could reach it three ways, and all three were open:
+
+### 1. `/ticker/24hr` is not a list of live markets
+
+Binance keeps returning rows for symbols it no longer trades, and for delisted
+pairs the row carries the last snapshot. `_isListed` only checked the *shape* of
+the symbol (ends in USDT, positive price), so a dead pair looked identical to a
+live one. There was no `status` check anywhere in the app.
+
+Fixed with the authority Binance publishes for exactly this:
+`/exchangeInfo` → symbol is live only when `status == 'TRADING'`,
+`quoteAsset == 'USDT'`, `isSpotTradingAllowed != false`. Cached per process
+(weight 20, one call). On failure it returns an empty set, which makes the
+filter a no-op — the scan still runs.
+
+### 2. Nothing checked how old the candles were
+
+This is the deeper bug. A delisted symbol still answers `/klines` **with its
+old history**, and the engine has no notion of "now": 400 bars of 4H and 500 of
+15M from a year ago score exactly like today's. `isLive()` now requires the
+newest bar to end within 6 hours (10 for 4H, which legitimately misses the
+forming bar). A coin that fails is counted as `_delisted` and skipped.
+
+### 3. v11.1 would have priced it on another exchange anyway
+
+Even with a Binance ticker row, Binance could not serve the candles, so
+`_feedOrder()` fell through to OKX/Bybit/MEXC — where a GALUSDT market may still
+exist at 2.54 — while the card said `(Binance)`. The v12 `scan: true` lock
+closes this, and it is why the GAL card was internally consistent: the entry,
+stop and target all came from one coherent series, just not Binance's.
+
+### On screen
+
+```
+Binance 3745 ticker (N delisted) → N listed (N strong) → N picked → N analysed (N stale data)
+```
+
+`delisted` is rows the exchange sent for symbols it no longer trades; `stale
+data` is coins dropped because their candles ended hours ago. Both are printed
+because a silent filter is how this went unnoticed for ten versions.
