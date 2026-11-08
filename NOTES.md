@@ -104,3 +104,51 @@ why the UI leads with total R and greys the win rate out under 20 trades.
 - After non-trivial Dart edits, trust CI over local parsing: tree-sitter catches
   syntax but not type/arity errors.
 - Backticks inside `gh pr comment --body '...'` heredocs need escaping.
+
+---
+
+## 9. v5 · 300 — wider universe, engine untouched (2026-11-08)
+
+**Asked:** "আচ্ছা এখান থেকে ৩০০টা কয়েন অ্যাড করতে বলি তাহলে কি কোন সমস্যা হবে" →
+"আচ্ছা করো কিন্তু কোন ধরনের চেঞ্জ করবে না আগে যে নিয়মে চলত সেই নিয়মেই যেন থাকে".
+
+**What changed (scanner plumbing only):**
+
+| change | why |
+|---|---|
+| `60/40` → `150/150` coins (300 max) | the ask; top-mover picker logic untouched |
+| 15M fetched first, then 4H with `liveFrom:` | the 4H cache needs the fresh 15M tail anyway; one request per coin saved |
+| **closed-bar 4H cache** (max 320 coins) | a closed 4H bar cannot change; the forming bar is rebuilt from the 15M series it already has |
+| cache expires when the forming bar would close (1 min early) | a late expiry leaves a hole in the series (one bar short) — measured |
+| 4–6 concurrent workers (`>120 coins` → 6) | keeps a 300-coin scan inside the 5-minute auto-refresh slot |
+| per-pair 15-minute cooldown after a candle failure | one dead symbol used to burn 5 mirror attempts on every scan |
+| chunked list commit (25 coins) | a 300-coin scan no longer rebuilds the list per coin, and it is not empty for the whole scan |
+| `_tooYoung` counter | young listings (<120 4H bars) are counted apart instead of being reported as "no 4H trend" |
+| `v5 · 300` / `5.0.0+5` | the installed build must be identifiable from a screenshot |
+| status line shows `4H cache hits/hits+misses (cached coins)` | proof on device that the cache is warm |
+
+**What did NOT change — deliberately:** swing lengths (50/5), the pivot state
+machine, BOS/CHoCH, order blocks, FVGs, EQH/EQL, premium/discount, the scoring
+table, STRICT 60 / WATCH 40, the live-trigger rule, SL/TP maths, the 8% risk
+reject, RADAR semantics, and the windows fed to the engine (4H 400 / 1H 200 /
+15M 200 from 600 fetched bars). The backtester is untouched and out of scope.
+
+**Measured before committing** (`/home/user/smt-verify/`):
+
+- `verify_4h_cache.py` — EQUIVALENCE: 3840 cases (120 series × 32 cut points
+  inside a 4H bar), **0 mismatches** against the exchange's own 4H aggregation,
+  forming bar rebuilt correctly in 3840/3840. FRESHNESS: 4/4 cases. A drift
+  guard fails the run if `lib/main.dart` stops containing the lines the mirror
+  was written against.
+- `budget.py` — warm cache: 300 requests → 600 requests for 3× the coins
+  (old 300 requests for 100 coins), 58 MB/scan vs 29 MB, 66 s vs 48 s.
+  Cold first scan: 900 requests / 88 MB / 96 s.
+
+**Bug found by the measurement, before it shipped:** the first `_merge4h` used
+`k.openTime > lastClosedOpen`, which swept the 15 forming bars of the *last
+closed* bar into the new one — 5440 mismatches. Fixed to `>= boundary`.
+The freshness horizon also expired one bar too late at first (20-minute margin
+on the wrong side), which would have left a hole in the 4H series.
+
+**Still open:** device numbers for `v5 · 300` (scan time, cache hit ratio,
+STRICT/WATCH/RADAR counts) — the CI APK has not been run yet.

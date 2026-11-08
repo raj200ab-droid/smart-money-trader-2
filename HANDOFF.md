@@ -5,8 +5,9 @@ without losing a single decision, number, or promise. Read it top to bottom
 before touching anything. If something here conflicts with the code, the code
 wins — then update this file.
 
-Last updated: 2026-11-05 · branch `arena/ad2b42dc-smart-money-trader-2` ·
-PR #1 open · 23 commits ahead of `main` · `lib/main.dart` = 3454 lines
+Last updated: 2026-11-08 · branch `arena/5182e84b-smart-money-trader-2` ·
+build `v5 · 300` / `5.0.0+5` · `lib/main.dart` ≈ 3600 lines ·
+PR #1 merged; this branch is the 300-coin work
 
 ---
 
@@ -157,6 +158,18 @@ UI leads with total R.
   backtest path was reworked.
 - **No backtest numbers from the fixed build have been reported yet.**
 
+## 8b. v5 · 300 — the 300-coin scan (2026-11-08)
+
+Asked for 300 coins, then: *"কোন ধরনের চেঞ্জ করবে না আগে যে নিয়মে চলত সেই নিয়মেই যেন
+থাকে"*. So the engine was not touched — see NOTES.md §9 for the full diff list.
+
+- universe `150 + 150`; the scorer, tiers, SL/TP and windows are byte-identical
+- closed-bar 4H cache + forming bar rebuilt from the fresh 15M series
+  (**3840/3840 cases identical to the exchange's own 4H**, drift-guarded test in
+  `/home/user/smt-verify/verify_4h_cache.py`)
+- warm cache: 3× the coins for 2× the requests (600), 66 s scan, 58 MB
+- device numbers for this build are **not in yet** — that is the next open item
+
 ## 9. Open items
 
 1. **New repo blocked.** He created `smart-money-new-version-` (private). The
@@ -168,8 +181,8 @@ UI leads with total R.
 2. **PR #1 is still open**, so `NOTES.md` / `HANDOFF.md` are only on the branch —
    `main` does not have them. He asked why "the note is not copying"; the answer
    is: not merged yet.
-3. **Device backtest numbers** for the fixed build — trades, OPEN count, total R,
-   BUY/SELL split.
+3. **Device numbers for `v5 · 300`** — scan time, `4H cache hits/hits+misses`,
+   STRICT/WATCH/RADAR counts. Nothing has been reported from a phone yet.
 4. Offered, not built: STRICT-only toggle, breakeven/trailing stops,
    liquidity-based TP.
 

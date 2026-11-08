@@ -21,11 +21,11 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v4 · radar';
+const String kBuild = 'v5 · 300';
 
 /// App version reported to Android, so the installed build is identifiable
 /// from Settings without opening the app.
-const String kVersionName = '4.0.0+4';
+const String kVersionName = '5.0.0+5';
 
 class K {
   static const Color bg = Color(0xFF0D1117);
@@ -398,6 +398,34 @@ class MarketData {
     _downUntil.remove(f.name);
   }
 
+  /// Pairs that just failed to produce candles, and until when to skip them.
+  ///
+  /// One dead symbol costs five mirror attempts plus feed fallbacks. With 100
+  /// coins that is tolerable; with 300 the same coin is retried on every scan
+  /// forever. A pair that fails is left alone for a few scans, then retried
+  /// once — so a genuinely relisted pair is not lost, and a dead one does not
+  /// tax every scan.
+  static final Map<String, DateTime> _pairDownUntil = <String, DateTime>{};
+  static const Duration _pairCooldown = Duration(minutes: 15);
+
+  static bool _pairDown(String sym) {
+    final until = _pairDownUntil[sym];
+    if (until == null) return false;
+    if (DateTime.now().isAfter(until)) {
+      _pairDownUntil.remove(sym);
+      return false;
+    }
+    return true;
+  }
+
+  static void _pairFail(String sym) {
+    _pairDownUntil[sym] = DateTime.now().add(_pairCooldown);
+    if (_pairDownUntil.length > 400) {
+      final cold = _pairDownUntil.keys.first;
+      _pairDownUntil.remove(cold);
+    }
+  }
+
   static const Duration _lag = Duration(
     milliseconds: 120,
   );
@@ -446,8 +474,8 @@ class MarketData {
   /// Binance is geo-blocked in many regions; if every mirror fails we walk
   /// the other feeds, because each one exposes the same USDT pairs.
   static Future<List<CoinData>> marketScan({
-    int gainers = 60,
-    int losers = 40,
+    int gainers = 150,
+    int losers = 150,
   }) async {
     var errors = <String>[];
 
@@ -516,7 +544,137 @@ class MarketData {
     return out;
   }
 
+  /// Closed 4H candles, kept between scans.
+  ///
+  /// A 4H bar cannot change once it has closed, so refetching 600 bars for
+  /// every coin on every five minute scan is pure waste — and at 300 coins
+  /// that waste is two thirds of the network traffic. Only the *closed* bars
+  /// are cached (at most until the current 4H bar ends plus a margin); the bar
+  /// that is still forming is rebuilt from the fresh 15M series, so the list
+  /// handed to the engine is what Binance itself would have returned — windows,
+  /// scoring and tiers are untouched. The first scan is cold, the rest reuse.
+  static final Map<String, List<Candle>> _cache4h = <String, List<Candle>>{};
+  static final Map<String, DateTime> _cache4hAt = <String, DateTime>{};
+  static const int _cache4hMax = 320;
+  /// Expire a little *early* rather than late: a 4H series that is one bar
+  /// short has a hole in it, while refetching a minute too soon costs nothing.
+  static const Duration _cacheEarlyExpiry = Duration(minutes: 1);
+  static int cacheHits = 0;
+  static int cacheMisses = 0;
+
+  /// Counters are per scan; the status line shows them so a device build can
+  /// prove the cache is doing its job instead of being silently cold.
+  static void resetCacheStats() {
+    cacheHits = 0;
+    cacheMisses = 0;
+  }
+
+  static int get cached4h => _cache4h.length;
+
+  static const int _ms4h = 4 * 60 * 60 * 1000;
+
+  /// True while no 4H bar has closed since the cache was written.
+  ///
+  /// The cache holds closed bars only, so the bar that was forming at fetch
+  /// time is missing from it. That gap is harmless until the forming bar
+  /// itself closes — at that moment the cache would be one bar short and has
+  /// to be refetched. So the horizon is exactly: last closed bar + 2 x 4H.
+  static bool _cache4hFresh(String sym) {
+    final closedBar = _cache4h[sym];
+    if (closedBar == null || closedBar.isEmpty) return false;
+    if (_cache4hAt[sym] == null) return false;
+    final horizon = DateTime.fromMillisecondsSinceEpoch(
+      closedBar.last.openTime + 2 * _ms4h,
+    );
+    return DateTime.now().isBefore(horizon.subtract(_cacheEarlyExpiry));
+  }
+
+  static List<Candle> _cache4hPut(String sym, List<Candle> closed) {
+    _cache4h.remove(sym);
+    _cache4h[sym] = closed;
+    _cache4hAt[sym] = DateTime.now();
+    // Dart maps keep insertion order, so the first key is the coldest.
+    while (_cache4h.length > _cache4hMax) {
+      final cold = _cache4h.keys.first;
+      _cache4h.remove(cold);
+      _cache4hAt.remove(cold);
+    }
+    return closed;
+  }
+
+  /// Merge cached closed 4H bars with the bar that is still forming in [c15].
+  /// Only the tail is rebuilt, and only from data newer than the last closed
+  /// 4H bar; every closed bar is passed through untouched.
+  static List<Candle> _merge4h(List<Candle> closed, List<Candle> c15, int lim) {
+    final bars = <Candle>[];
+    if (closed.isNotEmpty) {
+      final lastClosedOpen = closed.last.openTime;
+      // The next 4H bar opens exactly one 4H span after the closed one.
+      final boundary = lastClosedOpen + _ms4h;
+      final keep = closed.length > lim - 1 ? lim - 1 : closed.length;
+      bars.addAll(closed.sublist(closed.length - keep));
+      final tailBars = c15.where((k) => k.openTime >= boundary).toList();
+      if (tailBars.isNotEmpty) {
+        double hi = tailBars.first.high;
+        double lo = tailBars.first.low;
+        double vol = 0;
+        for (final k in tailBars) {
+          if (k.high > hi) hi = k.high;
+          if (k.low < lo) lo = k.low;
+          vol += k.volume;
+        }
+        bars.add(Candle(
+          openTime: boundary,
+          closeTime: boundary + _ms4h - 1,
+          open: tailBars.first.open,
+          high: hi,
+          low: lo,
+          close: tailBars.last.close,
+          volume: vol,
+        ));
+      }
+    }
+    return bars;
+  }
+
+  /// [liveFrom] is the freshly fetched 15M series of the same coin. It is how
+  /// the 4H cache rebuilds the bar that is still forming without a second
+  /// request. Callers that cannot supply it get a fresh 4H series (the cache is
+  /// an optimisation, never a different answer).
   static Future<List<Candle>> candles(
+    String sym,
+    String tf,
+    int lim, {
+    List<Candle>? liveFrom,
+  }) async {
+    // Deep history (backtest) is an explicit user action for one coin: never
+    // served from the scan cache and never blocked by a scan cooldown.
+    final deep = lim > 1000;
+    if (!deep && _pairDown(sym)) throw MarketDataException('candles $sym');
+    if (deep) return _fetchCandles(sym, tf, lim);
+
+    if (tf == '4h' && liveFrom != null) {
+      final closed = _cache4h[sym];
+      if (closed != null && _cache4hFresh(sym)) {
+        final merged = _merge4h(closed, liveFrom, lim);
+        if (merged.length >= lim) {
+          cacheHits++;
+          return merged;
+        }
+      }
+      cacheMisses++;
+      final fresh = await _fetchCandles(sym, tf, lim);
+      if (fresh.length >= lim) {
+        // Keep every bar except the one that is still forming; that one is
+        // rebuilt from fresh 15M data, so nothing served from here is stale.
+        _cache4hPut(sym, fresh.sublist(0, fresh.length - 1));
+      }
+      return fresh;
+    }
+    return _fetchCandles(sym, tf, lim);
+  }
+
+  static Future<List<Candle>> _fetchCandles(
     String sym,
     String tf,
     int lim,
@@ -548,6 +706,7 @@ class MarketData {
       }
       await Future<void>.delayed(_lag);
     }
+    _pairFail(sym);
     throw MarketDataException('candles $sym');
   }
 
@@ -2179,8 +2338,20 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HS();
 }
 
+/// One coin's engine result, kept until its chunk is committed.
+class _CoinOut {
+  _CoinOut(this.sig, this.nearMiss);
+
+  final TradeSignal? sig;
+  final String? nearMiss;
+}
+
 class _HS extends State<HomeScreen> {
   final List<TradeSignal> _signals = <TradeSignal>[];
+
+  /// Per-coin engine output for the current scan, committed in chunks.
+  /// Indexes line up with the coin list so a chunk commit is a plain copy.
+  List<_CoinOut?> _scratch = <_CoinOut?>[];
 
   bool _loading = true;
   String _msg = 'Starting...';
@@ -2190,6 +2361,7 @@ class _HS extends State<HomeScreen> {
   int _failed = 0;
   int _noBias = 0;
   int _biasNoSetup = 0;
+  int _tooYoung = 0;
   final List<String> _nearMiss = <String>[];
   int _scanId = 0;
   String _feed = '';
@@ -2212,6 +2384,7 @@ class _HS extends State<HomeScreen> {
 
   Future<void> run() async {
     final id = ++_scanId;
+    MarketData.resetCacheStats();
 
     if (mounted) {
       setState(() {
@@ -2224,13 +2397,16 @@ class _HS extends State<HomeScreen> {
         _failed = 0;
         _noBias = 0;
         _biasNoSetup = 0;
+        _tooYoung = 0;
         _nearMiss.clear();
       });
     }
 
     try {
-      final coins = await MarketData.marketScan(gainers: 60, losers: 40);
+      final coins = await MarketData.marketScan(gainers: 150, losers: 150);
       if (id != _scanId || !mounted) return;
+
+      _scratch = List<_CoinOut?>.filled(coins.length, null);
 
       setState(() {
         _feed = MarketData.activeFeed;
@@ -2249,6 +2425,40 @@ class _HS extends State<HomeScreen> {
         return;
       }
 
+      // Two pool sizes: 4 requests in flight on a wide universe keeps the scan
+      // inside its five minute slot without hammering the exchange. A narrow
+      // universe stays at the old four.
+      final workers = coins.length > 120 ? 6 : 4;
+
+      // Coins are analysed in chunks: each chunk is committed to the list as a
+      // whole. Analysing 300 coins in one setState per coin rebuilds the list
+      // thousands of times; more importantly, a partial list is replaced at
+      // chunk boundaries so the user is never left staring at an empty screen
+      // for a whole wide scan.
+      const int chunk = 25;
+      int commitFrom = 0;
+      int frontier = 0;
+      final finished = List<bool>.filled(coins.length, false);
+
+      void commit({required bool finalChunk}) {
+        final upto = frontier;
+        for (var k = commitFrom; k < upto; k++) {
+          final got = _scratch[k];
+          if (got == null) continue;
+          if (got.sig != null) _signals.add(got.sig!);
+          if (got.nearMiss != null) _nearMiss.add(got.nearMiss!);
+        }
+        commitFrom = upto;
+        if (!finalChunk) return;
+        int rank(TradeSignal t) =>
+            t.tier == 'STRICT' ? 2 : (t.tier == 'WATCH' ? 1 : 0);
+        _signals.sort((a, b) {
+          final r = rank(b).compareTo(rank(a));
+          return r != 0 ? r : b.confidence.compareTo(a.confidence);
+        });
+        _loading = false;
+      }
+
       int next = 0;
 
       Future<void> worker() async {
@@ -2262,9 +2472,12 @@ class _HS extends State<HomeScreen> {
           try {
             // The full history is needed for the long-window structure check;
             // the engine itself is fed the trailing 200 bars per timeframe.
-            final c4 = await MarketData.candles(sym, '4h', 600);
-            final c1 = await MarketData.candles(sym, '1h', 600);
+            // 15M first: its fresh tail is what rebuilds the forming 4H bar,
+            // so the 4H series never needs its own request once cached.
             final c15 = await MarketData.candles(sym, '15m', 600);
+            final c4 =
+                await MarketData.candles(sym, '4h', 600, liveFrom: c15);
+            final c1 = await MarketData.candles(sym, '1h', 600);
 
             if (id != _scanId || !mounted) return;
 
@@ -2278,38 +2491,51 @@ class _HS extends State<HomeScreen> {
             final w4 = tail(c4, 400);
             final w1 = tail(c1, 200);
             final w15 = tail(c15, 200);
-            final bias = Engine.analyze('4H', w4);
 
-            // Strict SMC confluence first; fall back to the relaxed pass so
-            // the list is not empty in quiet markets (flagged WATCH).
-            var sig = Engine.multiTF(sym, w4, w1, w15, c4Long: c4, c1Long: c1);
-            sig ??= Engine.multiTF(sym, w4, w1, w15,
-                c4Long: c4, c1Long: c1, relaxed: true);
-            // Nothing strict or relaxed: fall back to the radar candidate so a
-            // quiet market still shows what the engine is watching.
-            sig ??= Engine.radar(sym, w4, w1, w15, c4Long: c4, c1Long: c1);
+            // A wide universe pulls in young listings whose 4H series is
+            // shorter than one swing (the engine needs 60 bars, the bias
+            // window wants 400). Counting those as "no 4H trend" would make
+            // the empty-state explanation lie, so they are counted apart.
+            if (c4.length < 120) {
+              if (mounted) setState(() => _tooYoung++);
+            } else {
+              final bias = Engine.analyze('4H', w4);
 
-            if (mounted) {
-              setState(() {
-                if (sig != null) {
-                  _signals.add(sig);
+              // Strict SMC confluence first; fall back to the relaxed pass so
+              // the list is not empty in quiet markets (flagged WATCH).
+              var sig = Engine.multiTF(sym, w4, w1, w15,
+                  c4Long: c4, c1Long: c1);
+              sig ??= Engine.multiTF(sym, w4, w1, w15,
+                  c4Long: c4, c1Long: c1, relaxed: true);
+              // Nothing strict or relaxed: fall back to the radar candidate so
+              // a quiet market still shows what the engine is watching.
+              sig ??= Engine.radar(sym, w4, w1, w15,
+                  c4Long: c4, c1Long: c1);
+
+              final why = <String>[];
+              if (sig == null) {
+                // Track why a coin was dropped so an empty list can explain
+                // itself instead of looking like a dead app.
+                if (bias.trend == 0) {
+                  _noBias++;
                 } else {
-                  // Track why a coin was dropped so an empty list can explain
-                  // itself instead of looking like a dead app.
-                  if (bias.trend == 0) {
-                    _noBias++;
-                  } else {
-                    _biasNoSetup++;
-                  }
-                  final why = <String>[];
-                  Engine.multiTF(sym, w4, w1, w15,
-                      c4Long: c4, c1Long: c1, relaxed: true, trace: why);
-                  _nearMiss.add('$sym: ${why.join(' • ')}');
+                  _biasNoSetup++;
                 }
-              });
+                Engine.multiTF(sym, w4, w1, w15,
+                    c4Long: c4, c1Long: c1, relaxed: true, trace: why);
+              }
+              _scratch[i] = _CoinOut(sig, why.isEmpty ? null : '$sym: '
+                  '${why.join(' • ')}');
             }
           } catch (_) {
             if (mounted) setState(() => _failed++);
+          }
+
+          // Commit only from the contiguous finished frontier: coins finish
+          // out of order, and advancing past an unfinished coin would drop it.
+          finished[i] = true;
+          while (frontier < finished.length && finished[frontier]) {
+            frontier++;
           }
 
           if (mounted) {
@@ -2319,37 +2545,49 @@ class _HS extends State<HomeScreen> {
             });
           }
 
+          // Commit once a chunk is complete, so the list is never rebuilt per
+          // coin and never empty for long.
+          if (frontier - commitFrom >= chunk) {
+            if (mounted && id == _scanId) {
+              setState(() => commit(finalChunk: false));
+            }
+          }
+
           await Future<void>.delayed(const Duration(milliseconds: 120));
         }
       }
 
       await Future.wait(<Future<void>>[
-        for (int w = 0; w < 4; w++) worker(),
+        for (int w = 0; w < workers; w++) worker(),
       ]);
 
       if (id != _scanId || !mounted) return;
 
       setState(() {
-        int rank(TradeSignal t) =>
-            t.tier == 'STRICT' ? 2 : (t.tier == 'WATCH' ? 1 : 0);
-        _signals.sort((a, b) {
-          final r = rank(b).compareTo(rank(a));
-          return r != 0 ? r : b.confidence.compareTo(a.confidence);
-        });
-        _loading = false;
+        commit(finalChunk: true);
         final strict = _signals.where((s) => s.tier == 'STRICT').length;
         final watch = _signals.where((s) => s.tier == 'WATCH').length;
         final radar = _signals.where((s) => s.isRadar).length;
+        final hits = MarketData.cacheHits;
+        final misses = MarketData.cacheMisses;
+        // Proof on the device that the cache is warm, and which build is
+        // running. A cold first scan shows 0 - that is expected.
+        final cacheNote =
+            ' • 4H cache $hits/$hits+$misses (${MarketData.cached4h})';
         // An empty list must explain itself: "no 4H trend" and "trend but no
         // 15M trigger" are completely different problems.
         final why = _noBias >= _biasNoSetup
             ? '$_noBias/$_total coin-e 4H trend nei'
             : '$_biasNoSetup coin-e 4H trend ache, kintu 15M trigger/zone '
                 'mile nai';
+        final young =
+            _tooYoung > 0 ? ' • $_tooYoung notun coin (4H history kom)' : '';
         _msg = _signals.isEmpty
-            ? 'Kono setup nei ekhon ($_feed) — $why. 5 min por auto refresh.'
+            ? 'Kono setup nei ekhon ($_feed) — $why.$young '
+                '5 min por auto refresh.'
             : '$strict signal • $watch watch • $radar radar ($_feed)'
-                '${_failed > 0 ? ' • $_failed coin skip' : ''}';
+                '${_failed > 0 ? ' • $_failed coin skip' : ''}$young'
+                '$cacheNote';
       });
     } catch (e) {
       if (!mounted || id != _scanId) return;

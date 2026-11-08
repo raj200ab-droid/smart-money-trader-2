@@ -41,6 +41,17 @@ pass with a lower threshold and no counter-trend gate. Watch signals are marked
 
 ## Why the list can be empty
 
+The scanner analyses **300 coins** — the top 150 gainers plus the top 150 losers
+of the last 24h (volume > 5M USDT, stablecoins and leveraged tokens excluded),
+six requests in flight, and it reports progress per coin. A wider universe does
+not raise the STRICT pass rate (~1%), it only gives more candidates to rank.
+
+4H history is fetched once and then kept as **closed bars only**; the bar that is
+still forming is rebuilt from the fresh 15M series, so the candles the engine
+sees are identical to what the exchange would return (verified: 3840 cases, 0
+mismatches). That halves the request count of a scan. A pair that fails is left
+alone for 15 minutes instead of five mirror attempts on every scan.
+
 The scanner runs three tiers and labels every card:
 
 | tier | meaning |
@@ -53,12 +64,14 @@ The status panel also prints the build stamp (`v4 · radar`) and `pubspec.yaml`
 carries `4.0.0+4`, so the build installed on the phone is identifiable.
 
 The scanner reports *why* it found nothing. The status line tells you which of
-the two failure modes dominates across the 73 scanned coins:
+the two failure modes dominates across the scanned coins:
 
-- `N/73 coin-e 4H trend nei` — the higher timeframe has no confirmed structure
+- `N/300 coin-e 4H trend nei` — the higher timeframe has no confirmed structure
   break, so nothing is tradable by design
 - `N coin-e 4H trend ache, kintu 15M trigger/zone mile nai` — bias exists but
   the 1H OB/FVG or the 15M trigger is missing
+- `N notun coin (4H history kom)` — listed too recently to have 400 bars of 4H
+  structure; counted apart so it cannot be blamed on "no trend"
 
 Below the empty state a **"kache kache eshechilo"** list shows each coin's
 diagnosis and its score against the threshold, which is the data needed to
