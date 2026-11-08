@@ -21,11 +21,11 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v5 · 300';
+const String kBuild = 'v6 · unify';
 
 /// App version reported to Android, so the installed build is identifiable
 /// from Settings without opening the app.
-const String kVersionName = '5.0.0+5';
+const String kVersionName = '6.0.0+6';
 
 class K {
   static const Color bg = Color(0xFF0D1117);
@@ -191,20 +191,13 @@ class TFAnalysis {
   TFAnalysis({
     required this.timeframe,
     required this.structure,
-    required this.bos,
-    required this.sweep,
-    required this.buyScore,
-    required this.sellScore,
     required this.volumeSpike,
-    required this.buyConf,
-    required this.sellConf,
     required this.obs,
     required this.fvgs,
     required this.candles,
     required this.close,
     required this.atr,
     required this.trend,
-    required this.choch,
     required this.swingHigh,
     required this.swingLow,
     required this.premium,
@@ -224,13 +217,7 @@ class TFAnalysis {
 
   final String timeframe;
   final String structure;
-  final String? bos;
-  final String? sweep;
-  final double buyScore;
-  final double sellScore;
   final bool volumeSpike;
-  final List<String> buyConf;
-  final List<String> sellConf;
   final List<OrderBlock> obs;
   final List<FVG> fvgs;
   final List<Candle> candles;
@@ -239,7 +226,6 @@ class TFAnalysis {
 
   /// 1 = bullish, -1 = bearish, 0 = unknown. Swing (not internal) trend.
   final int trend;
-  final bool choch;
 
   /// Most recent confirmed swing high / low and its bar index.
   final SwingPoint? swingHigh;
@@ -1393,8 +1379,21 @@ class Engine {
   }
 
   /// Equal highs / equal lows: two confirmed pivots within ATR * threshold.
+  ///
+  /// Sourced from the INTERNAL pivots (length 5), as LUX does, and at 0.5 x ATR.
+  /// Measured on 8 synthetic series x 3 timeframes: at the old 0.1 x ATR over
+  /// SWING pivots this was true 0/48 times — consecutive swing pivots sit a
+  /// median 4.9 ATR apart, so the condition was unreachable and the UI's
+  /// "Liquidity" row always read "None". Internal pivots sit ~1.2 ATR apart and
+  /// 0.5 x ATR gives a 29% hit rate: visible, still selective.
+  ///
+  /// Deliberately DISPLAY-ONLY. A measured attempt to score or veto on the pool
+  /// (84 paired series, identical candles) changed the result by at most one
+  /// trade: 86 trades / +36.7R without it, 87 / +35.7R with it. That is noise,
+  /// not edge, and this project does not ship numbers it cannot defend - see
+  /// NOTES.md for the table. It is shown, not traded.
   static bool equalHighs(List<SwingPoint> pts, double atrValue,
-      {double threshold = 0.1}) {
+      {double threshold = 0.5}) {
     final highs = pts.where((p) => p.type == 'high').toList();
     if (highs.length < 2 || atrValue <= 0) return false;
     final a = highs[highs.length - 1].price;
@@ -1403,7 +1402,7 @@ class Engine {
   }
 
   static bool equalLows(List<SwingPoint> pts, double atrValue,
-      {double threshold = 0.1}) {
+      {double threshold = 0.5}) {
     final lows = pts.where((p) => p.type == 'low').toList();
     if (lows.length < 2 || atrValue <= 0) return false;
     final a = lows[lows.length - 1].price;
@@ -1450,6 +1449,14 @@ class Engine {
     final pattern = lastBreak?.pattern ?? '';
     final breakFresh = lastBreak != null && c.length - 1 - lastBreak.bar <= 2;
 
+    // The internal (len 5) series is a separate object, so its freshness has
+    // to be computed here. It was never set before, which silently disabled
+    // the WATCH pass's internal-break trigger and the RADAR fallback.
+    final internalLast =
+        internalRecent.isEmpty ? null : internalRecent.last;
+    final internalFresh = internalLast != null &&
+        c.length - 1 - internalLast.bar <= 4;
+
     // Order blocks come from the interval between each break and its pivot.
     final obs = <OrderBlock>[];
     for (final b in recent) {
@@ -1467,8 +1474,9 @@ class Engine {
     final active = activeObs(obs, c);
 
     final fvgList = fvgs(c);
-    final eqh = equalHighs(pts, swingAtr);
-    final eql = equalLows(pts, swingAtr);
+    // Internal pivots, as LUX does: swing pivots are far too sparse for pools.
+    final eqh = equalHighs(internal, swingAtr);
+    final eql = equalLows(internal, swingAtr);
     final vs = volSpike(c);
 
     // Premium / discount of the current swing range (LUX 5% / 47.5% split).
@@ -1484,95 +1492,6 @@ class Engine {
     }
 
     final px = c.last.close;
-    final insideRange = lastHigh != null &&
-        lastLow != null &&
-        px <= lastHigh.price &&
-        px >= lastLow.price;
-    final inPremium = insideRange && premium > 0 && px > premium;
-    final inDiscount = insideRange && premium > 0 && px < discount;
-
-    double bs = 0;
-    double ss = 0;
-    final bc = <String>[];
-    final sc = <String>[];
-
-    if (trend > 0) {
-      bs += 25;
-      bc.add('Bullish structure');
-    }
-    if (trend < 0) {
-      ss += 25;
-      sc.add('Bearish structure');
-    }
-
-    if (breakFresh && event == 'BULLISH') {
-      bs += 25;
-      bc.add(pattern == 'CHoCH' ? 'Bullish CHoCH' : 'Bullish BOS');
-    }
-    if (breakFresh && event == 'BEARISH') {
-      ss += 25;
-      sc.add(pattern == 'CHoCH' ? 'Bearish CHoCH' : 'Bearish BOS');
-    }
-
-    final internalLast = internalRecent.isEmpty ? null : internalRecent.last;
-    final internalFresh = internalLast != null &&
-        c.length - 1 - internalLast.bar <= 4;
-    if (internalFresh && internalLast.event == 'BULLISH') {
-      bs += 10;
-      bc.add('Internal bullish break');
-    }
-    if (internalFresh && internalLast.event == 'BEARISH') {
-      ss += 10;
-      sc.add('Internal bearish break');
-    }
-
-    for (final o in active) {
-      if (px >= o.low * 0.998 && px <= o.high * 1.002) {
-        if (o.type == 'bullish') {
-          bs += 20;
-          bc.add('Inside bullish OB');
-        } else {
-          ss += 20;
-          sc.add('Inside bearish OB');
-        }
-      }
-    }
-    for (final f in fvgList) {
-      if (px >= f.low * 0.998 && px <= f.high * 1.002) {
-        if (f.type == 'bullish') {
-          bs += 10;
-          bc.add('Inside bullish FVG');
-        } else {
-          ss += 10;
-          sc.add('Inside bearish FVG');
-        }
-      }
-    }
-
-    if (eql) {
-      bs += 10;
-      bc.add('Equal lows (liquidity)');
-    }
-    if (eqh) {
-      ss += 10;
-      sc.add('Equal highs (liquidity)');
-    }
-    if (vs) {
-      bs += 5;
-      ss += 5;
-      bc.add('Volume spike');
-      sc.add('Volume spike');
-    }
-
-    // Premium/discount: never buy at a premium, never sell at a discount.
-    if (inPremium) {
-      bs -= 20;
-      sc.add('Premium zone');
-    }
-    if (inDiscount) {
-      ss -= 20;
-      bc.add('Discount zone');
-    }
 
     return TFAnalysis(
       timeframe: tf,
@@ -1581,20 +1500,13 @@ class Engine {
           : trend < 0
               ? 'BEARISH'
               : 'NEUTRAL',
-      bos: event.isEmpty ? null : (breakFresh ? '${event}_BOS' : null),
-      sweep: null,
-      buyScore: bs,
-      sellScore: ss,
       volumeSpike: vs,
-      buyConf: bc,
-      sellConf: sc,
       obs: active,
       fvgs: fvgList,
       candles: c,
       close: px,
       atr: atrPer,
       trend: trend,
-      choch: pattern == 'CHoCH',
       swingHigh: lastHigh,
       swingLow: lastLow,
       premium: premium,
@@ -1627,20 +1539,13 @@ class Engine {
     return TFAnalysis(
       timeframe: local.timeframe,
       structure: local.structure,
-      bos: local.bos,
-      sweep: local.sweep,
-      buyScore: local.buyScore,
-      sellScore: local.sellScore,
       volumeSpike: local.volumeSpike,
-      buyConf: local.buyConf,
-      sellConf: local.sellConf,
       obs: local.obs,
       fvgs: local.fvgs,
       candles: local.candles,
       close: local.close,
       atr: local.atr,
       trend: local.trend,
-      choch: local.choch,
       swingHigh: local.swingHigh,
       swingLow: local.swingLow,
       premium: local.premium,
