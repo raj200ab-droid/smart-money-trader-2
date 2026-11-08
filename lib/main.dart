@@ -21,11 +21,11 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v10 · rrGate';
+const String kBuild = 'v10.1 · funnel';
 
 /// App version reported to Android, so the installed build is identifiable
 /// from Settings without opening the app.
-const String kVersionName = '10.0.0+10';
+const String kVersionName = '10.1.0+11';
 
 
 /// Minimum reward:risk a trade must be able to offer. The structure target
