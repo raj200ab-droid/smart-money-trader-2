@@ -21,11 +21,11 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v11 · 300coin';
+const String kBuild = 'v11.1 · 300ok';
 
 /// App version reported to Android, so the installed build is identifiable
 /// from Settings without opening the app.
-const String kVersionName = '11.0.0+12';
+const String kVersionName = '11.1.0+13';
 
 
 /// Minimum reward:risk a trade must be able to offer. The structure target
@@ -457,16 +457,19 @@ class MarketData {
   );
 
   /// Binance bills klines by `limit`: <=100 -> 1, <=500 -> 2, <=1000 -> 5.
-  /// The public budget is 1200 weight per minute per IP. A 300-coin scan at
-  /// weight 6/coin is 1800, so a scan that finishes in 60 s asks for 1800/min
-  /// and gets rate-limited (HTTP 429/418), which is how a "300 coin scan" ends
-  /// up analysing 36: the requests that fail are the coins.
   ///
-  /// Rather than tune worker counts (more workers = faster = *worse*), every
-  /// klines request takes a weighted slot from a rolling one-minute window.
-  /// The scan then runs as fast as the exchange allows and never trips the
-  /// ban. 900/min leaves a margin for the ticker call and retries.
-  static const int _weightPerMinute = 900;
+  /// The spot per-IP budget is **6000 weight per minute** (raised from 1200 on
+  /// 2023-08-25); the 1200 figure that still circulates applies to the order
+  /// endpoints, not to market data. A 300-coin scan at weight 6/coin is 1800,
+  /// so at the old 1200 assumption a fast scan looked 3.2x over budget and any
+  /// request that failed took a coin with it.
+  ///
+  /// Even so the exchange is metered rather than trusted: every klines request
+  /// takes a weighted slot from a rolling one-minute window. 4500/min leaves a
+  /// real margin under 6000 for the ticker call, retries and mirrors, while
+  /// still letting a cold 300-coin scan finish in about 30 seconds of budget
+  /// instead of being paced to two minutes.
+  static const int _weightPerMinute = 4500;
   static final List<MapEntry<DateTime, int>> _weightLog =
       <MapEntry<DateTime, int>>[];
   static Future<void>? _weightGate;
@@ -2549,6 +2552,11 @@ class _HS extends State<HomeScreen> {
   int _noBias = 0;
   int _biasNoSetup = 0;
   int _tooYoung = 0;
+
+  /// Coins analysed with a shorter 4H window than the ideal 400 bars, because
+  /// the wide universe reached into younger listings. They are still analysed —
+  /// a shorter bias window is a weaker read, not a missing one.
+  int _short4h = 0;
   final List<String> _nearMiss = <String>[];
   int _scanId = 0;
   String _feed = '';
@@ -2585,6 +2593,7 @@ class _HS extends State<HomeScreen> {
         _noBias = 0;
         _biasNoSetup = 0;
         _tooYoung = 0;
+        _short4h = 0;
         _nearMiss.clear();
         MarketData.resetFunnel();
       });
@@ -2695,9 +2704,15 @@ class _HS extends State<HomeScreen> {
             // shorter than one swing (the engine needs 60 bars, the bias
             // window wants 400). Counting those as "no 4H trend" would make
             // the empty-state explanation lie, so they are counted apart.
-            if (c4.length < 120) {
+            // The engine needs 60 bars to form a swing at all; the bias window
+            // ideally holds 400. Between 60 and 120 held bars the 4H read is
+            // weaker but real, and skipping those coins is what used to turn a
+            // 300-coin universe into a smaller one again — the quiet tier is
+            // exactly where young listings live.
+            if (c4.length < 60) {
               if (mounted) setState(() => _tooYoung++);
             } else {
+              if (c4.length < 120 && mounted) setState(() => _short4h++);
               final bias = Engine.analyze('4H', w4);
 
               // Strict SMC confluence first; fall back to the relaxed pass so
@@ -2795,8 +2810,13 @@ class _HS extends State<HomeScreen> {
         //   listed low              -> the exchange has few USDT pairs
         //   listed high, picked low -> too few pairs to reach the target
         final strong = MarketData.lastStrong;
+        // analysed = picked - the coins the engine could not read at all.
+        // Printed explicitly so "300 picked" and "300 analysed" can never be
+        // confused, and a shortfall always has a name.
+        final analysed = _total - _tooYoung - _failed;
         final funnel = ' • $funnelFeed $raw ticker → $tradable listed '
-            '($strong strong) → $_total analysed';
+            '($strong strong) → $_total picked → $analysed analysed'
+            '${_short4h > 0 ? ' ($_short4h short 4H)' : ''}';
         final small = _total < 120
             ? ' • Sotorkota: matro $_total coin — exchange e eto USDT pair nei'
             : '';

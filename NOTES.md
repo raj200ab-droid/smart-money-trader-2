@@ -524,3 +524,71 @@ Two changes:
 **No engine rule changed.** Windows, scoring, gates, targets and stops are
 untouched — the scan simply receives 300 coins instead of 36, so the same rules
 are applied to 8× more candidates.
+
+## 16. v11.1 — "will 300 actually happen?" answered with numbers, not hope
+
+v11 removed the two causes. The remaining question was whether a 300-coin scan
+is actually *feasible* on a phone, so each layer was computed rather than
+assumed.
+
+### The universe really does fill to 300
+
+`tool/mirror/test_universe.py` mirrors `_isListed` / `selectUniverse` / `_pick`
+and asserts the properties on a Binance-shaped snapshot:
+
+```
+455 listed -> 165 strong -> 300 selected -> 300 picked
+v10 behaviour on the same snapshot:         165 analysed
+```
+
+Also asserted: a quiet day (no pair above 5M) still reaches 300; an exchange
+listing only 80 pairs reports 80 (an honest shortfall, never invented coins);
+leveraged tokens and stablecoins never appear.
+
+Exchange capacity, from their published pair counts:
+
+| feed | USDT pairs | 300 reachable |
+|---|---|---|
+| Binance | ~450–500 | yes |
+| Bybit spot | ~350 | yes |
+| MEXC | ~1500 | yes |
+| OKX | ~250–300 | marginal (reports ~250–280) |
+
+### The rate limit I had assumed was wrong
+
+v11 metered at 900/min on the belief that the Binance budget is 1200/min. It is
+not: the spot per-IP limit was **raised from 1200 to 6000 weight/min on
+2023-08-25**, and 1200 now applies to order endpoints, not market data. At
+900/min a cold 300-coin scan was paced to ~120 s for no reason.
+
+Raised to 4500/min — a real margin under 6000 for the ticker call, retries and
+mirrors:
+
+| cache | weight | metered floor | HTTP work (6 workers) | scan |
+|---|---|---|---|---|
+| cold | 1800 | 24 s | 68 s | **~68 s** |
+| warm | 1200 | 16 s | 45 s | **~45 s** |
+
+The 4H cache is what turns 68 s into 45 s, which is why the `_cache4hMax`
+eviction bug mattered.
+
+### Young listings no longer vanish from the count
+
+The worker skipped any coin with fewer than 120 closed 4H bars (`_tooYoung`).
+The wide universe reaches into exactly those young listings, so a 300-coin scan
+could still analyse fewer. The engine needs 60 bars to form a swing at all, so:
+
+- **< 60 bars** — skipped, counted as `_tooYoung` (honest: no structure exists)
+- **60–119 bars** — analysed on the shorter window, counted as `_short4h`
+
+`_short4h` is printed rather than hidden, because a weaker 4H read is a fact the
+user should see, not a silent degradation.
+
+### The status line now states all four numbers
+
+```
+feed raw ticker -> listed (strong) -> picked -> analysed (short 4H)
+```
+
+`analysed = picked - tooYoung - failed`. "300 picked" and "300 analysed" can no
+longer be confused, and any shortfall has a name.
