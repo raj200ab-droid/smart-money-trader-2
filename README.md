@@ -107,13 +107,13 @@ being folded into the win rate. The backtest pulls ~40 days of 15M history by
 paging Binance klines (1000 rows per request) and degrades the 4H bias window
 from 400 to 200 to 120 bars when a listing is younger than that.
 
-Read the **total R**, not the win rate. The take profit is a fixed **1.05%** from
-entry while the stop stays structure-based, so a trade's reward:risk is whatever
-its stop distance happens to be — often far below 1:1. On a coin with a 1.8%
-ATR(1H) the stop is ~2.2% away, which makes R:R **0.49** and demands a **67%**
-win rate merely to break even. The screen therefore prints the win rate, the
-total R, the implied R:R and the break-even win rate together, plus the result
-after 0.25% fees+spread. A high win rate on its own is not a result.
+Read the **total R**, not the win rate. The take profit is the 15M swing level
+(2R when no swing sits beyond entry) and the stop is structure-based, so the two
+are linked — but the screen still prints the win rate, the total R, the implied
+R:R and the break-even win rate together, plus the result after 0.25%
+fees+spread, because a high win rate on its own is not a result. A fixed 1.05%
+target was tried and measured: it lifted the win rate from 38.9% to 75.6% and
+turned +13.4R into −8.4R, so it was removed again (NOTES §11–12).
 
 The backtest pulls up to 12000 bars of 15M history (~125 days) from live Binance
 klines, paged 1000 rows at a time, so a fast-resolving fixed target still

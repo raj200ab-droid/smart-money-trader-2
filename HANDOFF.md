@@ -6,7 +6,7 @@ before touching anything. If something here conflicts with the code, the code
 wins — then update this file.
 
 Last updated: 2026-11-08 · branch `arena/5182e84b-smart-money-trader-2` ·
-build `v7 · tp1.05` / `7.0.0+7` · `lib/main.dart` ≈ 3600 lines ·
+build `v8 · swingTP` / `8.0.0+8` · `lib/main.dart` ≈ 3600 lines ·
 PR #1 merged; this branch is the 300-coin work
 
 ---
@@ -204,6 +204,16 @@ Measured on the mirror **before** shipping: 643 trades, **75.6% win rate,
 −8.4R**. The win rate rose and the expectancy went negative — NOTES.md §11 has
 the table and the arithmetic. Do not "fix" this by raising the target without
 measuring; the same table shows 2.0% is only break-even.
+
+## 8e. v8 · swingTP — fixed target reverted (2026-11-08)
+
+The 1.05% take profit added in v7 was removed at the user's request. Target is
+`15M swing else 2R` again. Kept from v7: the deeper backtest sample (12000 15M
+bars), `maxTrades` 2000, the richer report (win rate + total R + R:R +
+break-even + cost), and `tool/mirror/` in the repo.
+
+Justification for the revert is the paired table in NOTES §11: 38.9% WR /
++13.4R with the swing target vs 75.6% WR / −8.4R with the fixed one.
 
 ## 9. Open items
 

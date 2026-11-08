@@ -257,3 +257,29 @@ request) — there is no synthetic data in the app path. It cannot be measured
 from this sandbox (only GitHub hosts are reachable, and Binance answers 451 from
 this IP range), so every number above is from the synthetic mirror. The device
 run is the missing piece, as always.
+
+
+---
+
+## 12. v8 · swingTP — the fixed 1.05% target was removed again (2026-11-08)
+
+**Asked:** "Tp er bisoy jta eakhon add korlam ota bad dayo" — remove the fixed
+1.05% take profit that v7 introduced.
+
+**Done:** target is back to `15M swing high/low when beyond entry, else 2R`.
+Removed with it: the "stop closer than target" reject and the `invertedTrades`
+counter that existed only to describe the fixed-target artefact.
+
+**Kept,** because they are improvements on their own and none of them changes the
+engine:
+
+- 12000 bars of 15M history (~125 days), 4H 1500, 1H 3000, `maxTrades` 2000
+- the report's win rate + total R + R:R + break-even win rate + 0.25% cost line
+- `tool/mirror/` (mirror, self-tests, measurement scripts) committed to the repo
+
+**The measurement that justifies the revert** is NOTES §11: the same engine on
+the same candles went from **38.9% WR / +13.4R** (swing target) to
+**75.6% WR / −8.4R** (fixed 1.05%). The revert is not a preference, it is that
+table.
+
+Build `v8 · swingTP` / `8.0.0+8`.
