@@ -251,6 +251,29 @@ test, not a quality test.
 - Done state now prints `raw ticker → tradable → picked`, because why the
   universe is 36 and not 300 is still **unexplained**.
 
+## 8h. v11 · 300coin — the universe is finally 300 (2026-11-09)
+
+Two defects, either fatal alone:
+
+1. **The 5M USDT floor lived inside all four ticker parsers.** A 300-coin scan
+   never had 300 candidates; every sub-$5M pair was gone before `_pick`. That is
+   the whole of "35 / 38 / 36 coins". The floor still exists but as a
+   *preference*: `selectUniverse()` returns strong pairs (>5M/day) first and
+   tops up to the target from the quiet tier. `_isListed()` now checks only
+   pair shape. `_pick` also fills its shortfall, so 300 means 300.
+2. **600 bars per timeframe × 3 × 300 coins = 4500 weight against a 1200/min
+   Binance budget (3.2× over).** The coins that get rate-limited are the ones
+   that vanish. The scan now requests 400/500/500 — exactly the engine's
+   windows — for weight 6/coin, and `reserveWeight()` meters a rolling
+   900/min budget so worker count no longer controls request rate.
+
+Plus: `_cache4hMax` 320 → 400 (it was evicting every series on a wide scan,
+making the hit path impossible), and the funnel line is now always on screen:
+`raw ticker → listed (strong) → analysed`.
+
+**No engine rule changed** — same windows, scores, gates, targets, stops; the
+scan just receives 300 coins instead of 36.
+
 ## 9. Open items
 
 1. **New repo blocked.** He created `smart-money-new-version-` (private). The
@@ -262,10 +285,11 @@ test, not a quality test.
 2. **PR #1 is still open**, so `NOTES.md` / `HANDOFF.md` are only on the branch —
    `main` does not have them. He asked why "the note is not copying"; the answer
    is: not merged yet.
-3. **Device numbers** — the funnel line (`raw → tradable → picked`) from a v10
-   Done-state screenshot, plus scan time and `4H cache hits`. Still nothing
-   reported from a phone, so the 36-coin cause is still unknown, and no engine
-   tuning (score, floor, stops) can be justified without it.
+3. **Device check for v11** — the funnel should now read roughly
+   `2800 ticker → 450 listed (165 strong) → 300 analysed`, and the second scan
+   should show `4H cache` hits instead of `0/0+36`. If `analysed` is still low,
+   the funnel line says which tier failed. Still no device backtest numbers
+   (trades / WR / total R), so no engine tuning is justified.
 4. Offered, not built: STRICT-only toggle, breakeven/trailing stops,
    liquidity-based TP.
 

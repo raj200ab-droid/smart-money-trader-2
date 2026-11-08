@@ -455,3 +455,72 @@ now settles on the device in one run:
 `resetFunnel()` now clears all three counters at the start of every scan and
 `lastFunnelFeed` records which exchange the numbers belong to, so a failed
 Binance attempt can no longer leave its raw count next to an OKX coin list.
+
+## 15. v11 — actually analysing 300 coins
+
+The v10 diagnosis said "~36 coins arrive, cause unknown, read the funnel". The
+user asked for 300 directly, so the cause had to be found and removed. It was
+two separate defects, either of which alone was fatal.
+
+### Defect 1 — the 5M USDT floor was applied inside the feed parsers
+
+`_isTradable` was called from all four ticker parsers, so a 300-coin scan never
+had 300 candidates to choose from. Every pair under $5M/day was gone before
+`_pick` ran. That is why three device runs showed 35 / 38 / 36: the pool
+entering `_pick` was already ~36.
+
+The floor is a real requirement (a 15M setup on a $200k/day pair cannot be
+filled at the shown price), so it was not simply deleted. It is now two tiers:
+
+- **strong** — above 5M USDT/day, always preferred
+- **quiet** — everything else that is genuinely listed, sorted by volume,
+  used only to reach the 300 target
+
+`selectUniverse(all, target)` does the split; `_isListed()` only checks shape
+(USDT, not a stablecoin, not a leveraged token, positive price). Verified
+against a Binance-shaped snapshot: 455 listed → 165 strong → 300 selected.
+
+`_pick` was also silently returning 292 of 300 when the green side ran short of
+150 coins. It now fills the shortfall from the remaining movers by absolute
+move, so the target is honoured, and honestly reports 80 when the exchange only
+lists 80.
+
+### Defect 2 — 300 coins could not have been fetched anyway
+
+Binance bills klines by `limit`, not by bars used:
+
+| limit | weight |
+|---|---|
+| ≤100 | 1 |
+| ≤500 | **2** |
+| ≤1000 | **5** |
+
+The scan asked for 600 bars on all three timeframes = **15 weight per coin**,
+4500 for 300 coins, against a 1200/min public budget — **3.2× over**. A scan
+fast enough to finish in 70 s would ask for 3857/min. The requests that get
+rate-limited are the coins, so a "300 coin scan" degrades into a small one.
+
+Two changes:
+
+1. **Ask for what the engine uses.** The engine windows are 400 (4H), 200 (1H),
+   200 (15M), so the scan now requests 400/500/500 for weight 2+2+2 = 6 per
+   coin, 1800 total, 1200 once the 4H cache is warm.
+2. **Meter the requests instead of the workers.** `reserveWeight()` keeps a
+   rolling one-minute window (budget 900/min, margin below 1200) and every
+   Binance klines call takes a slot first. Extra workers now add concurrency
+   only, never request rate — before this, *more* workers made rate-limiting
+   worse.
+
+### Also fixed in the same pass
+
+- `_cache4hMax` was 320 while the scan now needs 400 bars per coin. On a
+  300-coin scan the cache evicted the coldest series every time, so hits were
+  impossible even after the `>= lim - 1` fix. Raised to 400, and the hit path
+  was re-verified for 399+1, 599-downgraded, and no-tail cases.
+- The funnel line is now always shown:
+  `feed raw ticker → listed (strong) → analysed`. A shortfall can no longer be
+  silent, and the three tiers are distinguishable at a glance.
+
+**No engine rule changed.** Windows, scoring, gates, targets and stops are
+untouched — the scan simply receives 300 coins instead of 36, so the same rules
+are applied to 8× more candidates.

@@ -42,9 +42,19 @@ pass with a lower threshold and no counter-trend gate. Watch signals are marked
 ## Why the list can be empty
 
 The scanner analyses **300 coins** — the top 150 gainers plus the top 150 losers
-of the last 24h (volume > 5M USDT, stablecoins and leveraged tokens excluded),
-six requests in flight, and it reports progress per coin. A wider universe does
-not raise the STRICT pass rate (~1%), it only gives more candidates to rank.
+of the last 24h, and the count is a target it actually meets. Stablecoins and
+leveraged tokens are excluded; liquidity is a *preference*, not a filter: pairs
+above 5M USDT/day are chosen first and quieter pairs only fill the remaining
+places. That ordering matters because a hard 5M floor used to be applied inside
+the feed parsers, which silently shrank a "300 coin" scan to ~36 before the
+engine ever saw it (NOTES §15).
+
+Requests are metered, not throttled by worker count. Binance bills klines by
+`limit` (≤500 bars = weight 2, ≤1000 = 5), so the scan asks for exactly the
+engine's windows — 400 4H, 500 1H, 500 15M — and a rolling 900/min budget keeps
+a 300-coin scan inside the public 1200/min allowance instead of being
+rate-limited into a smaller universe. A wider universe does not raise the STRICT
+pass rate (~1%), it only gives more candidates to rank.
 
 4H history is fetched once and then kept as **closed bars only**; the bar that is
 still forming is rebuilt from the fresh 15M series, so the candles the engine

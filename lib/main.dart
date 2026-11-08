@@ -21,11 +21,11 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v10.1 · funnel';
+const String kBuild = 'v11 · 300coin';
 
 /// App version reported to Android, so the installed build is identifiable
 /// from Settings without opening the app.
-const String kVersionName = '10.1.0+11';
+const String kVersionName = '11.0.0+12';
 
 
 /// Minimum reward:risk a trade must be able to offer. The structure target
@@ -388,6 +388,10 @@ class MarketData {
   /// coin list.
   static String lastFunnelFeed = '';
 
+  /// How many of `lastTradable` cleared the preferred 5M USDT/day floor. The
+  /// difference is the quiet tier the universe was topped up from.
+  static int lastStrong = 0;
+
   /// Cleared at the start of every scan so a stale number can never be read as
   /// this scan's result.
   static void resetFunnel() {
@@ -395,6 +399,7 @@ class MarketData {
     lastTradable = 0;
     lastPicked = 0;
     lastFunnelFeed = '';
+    lastStrong = 0;
   }
 
   /// Feeds that just failed are skipped for a few minutes so a blocked
@@ -451,6 +456,71 @@ class MarketData {
     milliseconds: 120,
   );
 
+  /// Binance bills klines by `limit`: <=100 -> 1, <=500 -> 2, <=1000 -> 5.
+  /// The public budget is 1200 weight per minute per IP. A 300-coin scan at
+  /// weight 6/coin is 1800, so a scan that finishes in 60 s asks for 1800/min
+  /// and gets rate-limited (HTTP 429/418), which is how a "300 coin scan" ends
+  /// up analysing 36: the requests that fail are the coins.
+  ///
+  /// Rather than tune worker counts (more workers = faster = *worse*), every
+  /// klines request takes a weighted slot from a rolling one-minute window.
+  /// The scan then runs as fast as the exchange allows and never trips the
+  /// ban. 900/min leaves a margin for the ticker call and retries.
+  static const int _weightPerMinute = 900;
+  static final List<MapEntry<DateTime, int>> _weightLog =
+      <MapEntry<DateTime, int>>[];
+  static Future<void>? _weightGate;
+
+  /// Weight a klines request of `lim` bars costs on Binance.
+  static int klinesWeight(int lim) {
+    if (lim <= 100) return 1;
+    if (lim <= 500) return 2;
+    if (lim <= 1000) return 5;
+    return 10;
+  }
+
+  /// Wait until `weight` fits inside the rolling one-minute budget.
+  ///
+  /// Serialised through [_weightGate] so concurrent workers cannot all read
+  /// the same free space and overdraw it.
+  static Future<void> reserveWeight(int weight) async {
+    while (_weightGate != null) {
+      await _weightGate;
+    }
+    final mine = _reserveInner(weight);
+    _weightGate = mine;
+    try {
+      await mine;
+    } finally {
+      if (identical(_weightGate, mine)) _weightGate = null;
+    }
+  }
+
+  static Future<void> _reserveInner(int weight) async {
+    while (true) {
+      final now = DateTime.now();
+      _weightLog.removeWhere(
+        (e) => now.difference(e.key) > const Duration(minutes: 1),
+      );
+      var used = 0;
+      for (final e in _weightLog) {
+        used += e.value;
+      }
+      if (used + weight <= _weightPerMinute) {
+        _weightLog.add(MapEntry<DateTime, int>(now, weight));
+        return;
+      }
+      // Sleep until the oldest entry falls out of the window.
+      final oldest = _weightLog.first.key;
+      final wait = oldest.add(const Duration(minutes: 1)).difference(now);
+      await Future<void>.delayed(
+        wait > const Duration(milliseconds: 50)
+            ? wait
+            : const Duration(milliseconds: 50),
+      );
+    }
+  }
+
   /// Stablecoins / fiat / leveraged tokens that add no signal value.
   static const Set<String> _skip = <String>{
     'USDCUSDT',
@@ -479,15 +549,50 @@ class MarketData {
 
   static String baseOf(String symbol) => symbol.replaceAll('USDT', '');
 
-  static bool _isTradable(CoinData c) {
+  /// A pair may be *shaped* like a tradable USDT market. Volume is judged
+  /// separately, in two tiers, so a quiet market cannot silently shrink the
+  /// universe to a third of what the exchange offers.
+  static bool _isListed(CoinData c) {
     if (!c.symbol.endsWith('USDT')) return false;
     if (c.symbol == 'USDTUSDT') return false;
     if (_skip.contains(c.symbol)) return false;
     for (final suffix in _leveragedSuffixes) {
       if (c.symbol.endsWith(suffix)) return false;
     }
-    if (c.lastPrice <= 0) return false;
-    return c.quoteVolume > 5000000; // 5M USDT daily volume
+    return c.lastPrice > 0;
+  }
+
+  /// Daily quote volume a pair needs to be preferred. Pairs below it are still
+  /// usable: see [selectUniverse].
+  static const double _preferredVolume = 5000000;
+
+  /// Two tiers, because the old hard 5M floor was the whole story behind
+  /// "35 coins" on a 300-coin scan:
+  ///
+  ///  * tier 1 — every listed USDT pair above 5M USDT/day. Preferred, because
+  ///    a 15M setup on a pair that trades $200k/day cannot be filled at the
+  ///    shown price.
+  ///  * tier 2 — the rest of the listed pairs, highest volume first. Only used
+  ///    to reach [target] when tier 1 is short.
+  ///
+  /// The engine never sees a different candle or rule; it simply gets a full
+  /// universe instead of a filtered remnant. A pair that fails to fetch its
+  /// candles is still dropped by the caller.
+  static List<CoinData> selectUniverse(List<CoinData> all, int target) {
+    final listed = all.where(_isListed).toList();
+    final strong = listed.where((c) => c.quoteVolume > _preferredVolume).toList();
+    if (strong.length >= target) return strong;
+    final weak = listed
+        .where((c) => c.quoteVolume <= _preferredVolume)
+        .toList()
+      ..sort((a, b) => b.quoteVolume.compareTo(a.quoteVolume));
+    final out = <CoinData>[...strong];
+    final seen = strong.map((c) => c.symbol).toSet();
+    for (final c in weak) {
+      if (out.length >= target) break;
+      if (seen.add(c.symbol)) out.add(c);
+    }
+    return out;
   }
 
   /// Top gainers + top losers so both BUY and SELL setups can appear.
@@ -528,10 +633,17 @@ class MarketData {
       }
       try {
         final all = await _tickers(feed);
-        final picked = _pick(all, gainers, losers);
-        lastTradable = all.length;
+        // The 5M USDT floor used to be applied inside the feed parser, which
+        // is why a "300 coin" scan could only ever analyse ~36. Now the floor
+        // is a *preference*: strong pairs first, quiet ones only to fill the
+        // requested 300.
+        final wanted = gainers + losers;
+        final universe = selectUniverse(all, wanted);
+        final picked = _pick(universe, gainers, losers);
+        lastTradable = universe.length;
         lastPicked = picked.length;
         lastFunnelFeed = feed.name;
+        lastStrong = universe.where((c) => c.quoteVolume > _preferredVolume).length;
         if (picked.isEmpty) {
           errors.add('${feed.name}: empty');
           _markDown(feed);
@@ -565,6 +677,21 @@ class MarketData {
     for (final c in lose.take(losers)) {
       if (seen.add(c.symbol)) out.add(c);
     }
+    // A quiet day can leave fewer than `gainers` coins on the green side, which
+    // silently returns e.g. 292 of an intended 300. Fill the shortfall from the
+    // remaining movers (highest absolute move first) so the request is honoured.
+    final want = gainers + losers;
+    if (out.length < want) {
+      final rest = all
+          .where((c) => !seen.contains(c.symbol))
+          .toList()
+        ..sort((a, b) =>
+            b.priceChangePercent.abs().compareTo(a.priceChangePercent.abs()));
+      for (final c in rest) {
+        if (out.length >= want) break;
+        if (seen.add(c.symbol)) out.add(c);
+      }
+    }
     return out;
   }
 
@@ -579,7 +706,10 @@ class MarketData {
   /// scoring and tiers are untouched. The first scan is cold, the rest reuse.
   static final Map<String, List<Candle>> _cache4h = <String, List<Candle>>{};
   static final Map<String, DateTime> _cache4hAt = <String, DateTime>{};
-  static const int _cache4hMax = 320;
+  /// Enough for a full 300-coin universe plus a margin. At 320 the cache
+  /// evicted the coldest 4H series on a wide scan, so the second scan
+  /// refetched them and the hit counter never warmed up.
+  static const int _cache4hMax = 400;
   /// Expire a little *early* rather than late: a 4H series that is one bar
   /// short has a hole in it, while refetching a minute too soon costs nothing.
   static const Duration _cacheEarlyExpiry = Duration(minutes: 1);
@@ -809,7 +939,7 @@ class MarketData {
         lastRawTickers = data.length;
         final list = data
             .map((e) => CoinData.fromJson(e as Map<String, dynamic>))
-            .where(_isTradable)
+            .where(_isListed)
             .toList();
         if (list.isNotEmpty) return list;
       } catch (e) {
@@ -848,7 +978,7 @@ class MarketData {
         lowPrice: _d(m['lowPrice24h']),
         quoteVolume: _d(m['turnover24h']),
       );
-      if (_isTradable(coin)) out.add(coin);
+      if (_isListed(coin)) out.add(coin);
     }
     return out;
   }
@@ -882,7 +1012,7 @@ class MarketData {
         lowPrice: _d(m['low24h']),
         quoteVolume: quoteVolume,
       );
-      if (_isTradable(coin)) out.add(coin);
+      if (_isListed(coin)) out.add(coin);
     }
     return out;
   }
@@ -904,7 +1034,7 @@ class MarketData {
         lowPrice: _d(m['lowPrice']),
         quoteVolume: _d(m['quoteVolume']),
       );
-      if (_isTradable(coin)) out.add(coin);
+      if (_isListed(coin)) out.add(coin);
     }
     return out;
   }
@@ -939,6 +1069,10 @@ class MarketData {
     Object? last;
     for (final base in _binanceMirrors) {
       try {
+        // Take a slot from the rolling weight budget before asking. Only the
+        // Binance path is metered; the other feeds have their own limits and
+        // are used precisely when Binance is unavailable.
+        await reserveWeight(klinesWeight(lim));
         final data = await _getJson(
           '$base/klines?symbol=$sym&interval=$tf&limit=$lim',
         ) as List<dynamic>;
@@ -2484,9 +2618,11 @@ class _HS extends State<HomeScreen> {
         return;
       }
 
-      // Two pool sizes: 4 requests in flight on a wide universe keeps the scan
-      // inside its five minute slot without hammering the exchange. A narrow
-      // universe stays at the old four.
+      // Requests in flight. This is no longer a rate-limit control: every
+      // Binance klines call already takes a slot from the rolling weight
+      // budget, so extra workers only add concurrency, never request rate.
+      // 6 keeps a 300-coin scan near 90 s on a cold cache without bursty
+      // behaviour that looks like an attack to the exchange.
       final workers = coins.length > 120 ? 6 : 4;
 
       // Coins are analysed in chunks: each chunk is committed to the list as a
@@ -2529,14 +2665,18 @@ class _HS extends State<HomeScreen> {
 
           final sym = coins[i].symbol;
           try {
-            // The full history is needed for the long-window structure check;
-            // the engine itself is fed the trailing 200 bars per timeframe.
+            // Request exactly what the engine consumes, not 600 bars "just in
+            // case". Binance bills klines by `limit`: <=500 costs weight 2,
+            // 501-1000 costs 5. At 600 bars a 300-coin scan is 4500 weight
+            // (3.2x the 1200/min budget), which rate-limits the scan and makes
+            // coins fail. At 500/500/400 it is 1800, and 1200 once the 4H
+            // cache is warm.
             // 15M first: its fresh tail is what rebuilds the forming 4H bar,
             // so the 4H series never needs its own request once cached.
-            final c15 = await MarketData.candles(sym, '15m', 600);
+            final c15 = await MarketData.candles(sym, '15m', 500);
             final c4 =
-                await MarketData.candles(sym, '4h', 600, liveFrom: c15);
-            final c1 = await MarketData.candles(sym, '1h', 600);
+                await MarketData.candles(sym, '4h', 400, liveFrom: c15);
+            final c1 = await MarketData.candles(sym, '1h', 500);
 
             if (id != _scanId || !mounted) return;
 
@@ -2646,24 +2786,26 @@ class _HS extends State<HomeScreen> {
         final raw = MarketData.lastRawTickers;
         final tradable = MarketData.lastTradable;
         final funnelFeed = MarketData.lastFunnelFeed;
-        // A small universe must name its own funnel, otherwise the only way to
-        // tell "exchange sent a short list" from "our own filter ate it" is a
-        // screenshot and a guess. raw is what the feed returned, tradable is
-        // after _isTradable (5M USDT floor), _total is after _pick.
+        // The funnel, always shown: raw ticker rows -> listed USDT pairs ->
+        // coins analysed. `strong` is how many of the listed pairs cleared the
+        // preferred 5M USDT/day floor; the rest are the quiet tier used only to
+        // reach 300. If `picked` is still short, one of these numbers says why:
         //
-        //   raw low          -> the feed sent a truncated list
-        //   raw high, tradable low -> our 5M floor ate it
-        //   tradable high, picked low -> _pick(gainers, losers) is the limit
+        //   raw low                 -> the feed sent a truncated list
+        //   listed low              -> the exchange has few USDT pairs
+        //   listed high, picked low -> too few pairs to reach the target
+        final strong = MarketData.lastStrong;
+        final funnel = ' • $funnelFeed $raw ticker → $tradable listed '
+            '($strong strong) → $_total analysed';
         final small = _total < 120
-            ? ' • Sotorkota: matro $_total coin ($funnelFeed) — '
-                '$raw ticker → $tradable tradable → $_total picked'
+            ? ' • Sotorkota: matro $_total coin — exchange e eto USDT pair nei'
             : '';
         _msg = _signals.isEmpty
             ? 'Kono setup nei ekhon ($_feed) — $why.$young$small '
                 '5 min por auto refresh.'
             : '$strict signal • $watch watch • $radar radar ($_feed)'
                 '${_failed > 0 ? ' • $_failed coin skip' : ''}$young'
-                '$small$cacheNote';
+                '$funnel$cacheNote';
       });
     } catch (e) {
       if (!mounted || id != _scanId) return;
