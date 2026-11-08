@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [main, 'arena/**']
+    branches: [main, 'arena/**', 'apk/**']
   pull_request:
   workflow_dispatch:
 
