@@ -316,7 +316,7 @@ def analyze(c, tf='15M'):
 
 
 # --------------------------------------------------------------------- multiTF
-def multi_tf(c4, c1, c15, relaxed=False, tp_mode='pct', tp_pct=1.05):
+def multi_tf(c4, c1, c15, relaxed=False, tp_mode='swing', tp_pct=1.05):
     """Mirror of Engine.multiTF.
 
     tp_mode='swing' reproduces the app: TP is the 15M swing high/low when it is
@@ -410,8 +410,6 @@ def multi_tf(c4, c1, c15, relaxed=False, tp_mode='pct', tp_pct=1.05):
             risk = entry - sl
             if risk <= 0 or risk / entry > 0.08:
                 return None
-            if tp_mode == 'pct' and risk / entry < tp_pct / 100.0:
-                return None          # stop closer than target: can only lose
             if tp_mode == 'pct':
                 tp = entry * (1 + tp_pct / 100.0)
             elif t15['swingHigh'] and t15['swingHigh']['price'] > entry * 1.005:
@@ -437,8 +435,6 @@ def multi_tf(c4, c1, c15, relaxed=False, tp_mode='pct', tp_pct=1.05):
             risk = sl - entry
             if risk <= 0 or risk / entry > 0.08:
                 return None
-            if tp_mode == 'pct' and risk / entry < tp_pct / 100.0:
-                return None
             if tp_mode == 'pct':
                 tp = entry * (1 - tp_pct / 100.0)
             elif t15['swingLow'] and t15['swingLow']['price'] < entry * 0.995:
@@ -458,7 +454,7 @@ def multi_tf(c4, c1, c15, relaxed=False, tp_mode='pct', tp_pct=1.05):
 
 # ---------------------------------------------------------------- walk forward
 def walk(c4, c1, c15, step=1, window=200, window4h=400, max_trades=200,
-         tp_mode='pct', tp_pct=1.05):
+         tp_mode='swing', tp_pct=1.05):
     """Mirror of Backtester.run. No look-ahead, one trade at a time."""
     trades = []
     n = len(c15)
