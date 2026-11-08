@@ -592,3 +592,70 @@ feed raw ticker -> listed (strong) -> picked -> analysed (short 4H)
 
 `analysed = picked - tooYoung - failed`. "300 picked" and "300 analysed" can no
 longer be confused, and any shortfall has a name.
+
+## 17. v12 — the first real 300-coin scan, and what it exposed
+
+The v11.1 device scan worked: **300 / 300 analysed, 13 signal · 33 watch ·
+1 radar** (v9 produced one signal from 36 coins). The status line read:
+
+```
+Binance 3745 ticker → 300 listed (36 strong) → 300 picked → 300 analysed
+4H cache 0/0+300 (295)
+```
+
+Four defects were visible in that one line plus the GAL card.
+
+### A (P0) — signals could be computed on another exchange's candles
+
+`_fetchCandles` walked `_feedOrder()` = `[activeFeed, ...rest]`. A pair the
+primary feed could not serve was silently answered by the next venue. The card
+still said `(Binance)`, and the candles could be a different market entirely.
+The user's own Binance screenshot (GALA at 0.00153) against the app's GAL card
+(2.5420) is exactly how differently two venues can label the same ticker.
+
+Fixed: `candles(..., scan: true)` marks scan requests, and `_fetchCandles`
+then refuses any feed other than `activeFeed`. A pair the scan feed cannot
+serve is dropped and counted as failed — never answered by another exchange.
+The backtest and deep history keep the old multi-feed behaviour, because there
+the user has asked for one specific chart.
+
+### B — "300 listed" was a lie the funnel told every time
+
+`lastTradable = universe.length` *after* the 300 cap, so that field could never
+print anything but 300. The pool is now measured before the cap:
+`lastListed` and `lastStrongPool`. Only `lastListed` answers the real question
+("did the exchange send 450 pairs or 80?").
+
+### C — 36 strong is far too few, and the cause is not yet known
+
+On Binance, roughly 150–200 USDT pairs clear 5M/day. The scan found 36. Either
+`quoteVolume` is arriving small for most rows, or the 300-cap discards strong
+pairs before they are counted (it does: `selectUniverse` returns strong-first,
+so strong should dominate — getting only 36 means the strong pool really is
+~36). The new pre-cap `lastStrongPool` number settles this on the next scan.
+
+### D — the 4H cache is still `0/0+300`
+
+Everything is written (295 cached) and nothing is ever hit. `_cache4hFresh`
+is the only gate between write and reuse, so the expiry horizon must be
+comparing against a stale `openTime`. Not fixed yet — needs the hit/miss split
+after the next scan, which the status line already prints.
+
+### E — a thin book produced a STRICT trade
+
+The GAL card: entry 2.5420, SL 2.4509 (**−3.58%**), TP 2.7241 (+7.16%),
+R:R 1:2.00, **75% confidence, STRICT**, five confirmations. The arithmetic is
+fine. The subject is not: GALUSDT sits in the quiet tier, below 5M USDT/day,
+which is precisely the class of pair the old 5M floor existed to keep out of
+the trade list — and the wide universe is what pulled it back in.
+
+A 3.58% stop on a thin book can be jumped; entry and exit both slip. The fix
+is not to restore the hard floor (that returns the universe to 36). It is to
+stop the quiet tier from masquerading as liquid:
+
+- `TradeSignal.thinVolume` records the tier
+- `asThin()` demotes STRICT → WATCH and never downgrades RADAR
+- the card prints `Thin book (<5M USDT/day) — entry/SL e slippage hote pare`
+
+The engine itself is untouched: it still scores the setup the same way. What
+changes is the label the user acts on.

@@ -21,11 +21,11 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v11.1 · 300ok';
+const String kBuild = 'v12 · trust';
 
 /// App version reported to Android, so the installed build is identifiable
 /// from Settings without opening the app.
-const String kVersionName = '11.1.0+13';
+const String kVersionName = '12.0.0+14';
 
 
 /// Minimum reward:risk a trade must be able to offer. The structure target
@@ -304,6 +304,7 @@ class TradeSignal {
     required this.eql,
     required this.watch,
     required this.tier,
+    this.thinVolume = false,
   });
 
   final String symbol;
@@ -332,12 +333,45 @@ class TradeSignal {
   /// True when only the relaxed (lower-conviction) pass produced this signal.
   final bool watch;
 
+  /// True when the pair is in the quiet tier (below 5M USDT/day). The setup may
+  /// be genuine, but a thin book means the entry and the stop can both slip by
+  /// more than the edge. Such a signal is never printed as STRICT.
+  final bool thinVolume;
+
   /// 'STRICT' (full confluence), 'WATCH' (relaxed trigger/threshold) or
   /// 'RADAR' (bias and trigger present, zone or score still missing). RADAR is
   /// explicitly a candidate list, never a trade instruction.
   final String tier;
 
   bool get isRadar => tier == 'RADAR';
+
+  /// Same setup, on a thin book: never STRICT. RADAR stays RADAR (it is already
+  /// not a trade instruction); everything else becomes WATCH and is flagged so
+  /// the card can say why.
+  TradeSignal asThin() {
+    if (thinVolume) return this;
+    return TradeSignal(
+      symbol: symbol,
+      direction: direction,
+      price: price,
+      entry: entry,
+      sl: sl,
+      tp: tp,
+      confidence: confidence,
+      confirmations: confirmations,
+      time: time,
+      tf4h: tf4h,
+      tf1h: tf1h,
+      tf15m: tf15m,
+      pattern: pattern,
+      zone: zone,
+      eqh: eqh,
+      eql: eql,
+      watch: true,
+      tier: tier == 'RADAR' ? 'RADAR' : 'WATCH',
+      thinVolume: true,
+    );
+  }
 
   bool get isBuy => direction == 'BUY';
 
@@ -392,6 +426,12 @@ class MarketData {
   /// difference is the quiet tier the universe was topped up from.
   static int lastStrong = 0;
 
+  /// The listed pool *before* the 300 cap, and how many of those were strong.
+  /// Without these the funnel can only ever print "300 listed", which says
+  /// nothing about whether the exchange or our filter decided the universe.
+  static int lastListed = 0;
+  static int lastStrongPool = 0;
+
   /// Cleared at the start of every scan so a stale number can never be read as
   /// this scan's result.
   static void resetFunnel() {
@@ -400,6 +440,8 @@ class MarketData {
     lastPicked = 0;
     lastFunnelFeed = '';
     lastStrong = 0;
+    lastListed = 0;
+    lastStrongPool = 0;
   }
 
   /// Feeds that just failed are skipped for a few minutes so a blocked
@@ -569,6 +611,10 @@ class MarketData {
   /// usable: see [selectUniverse].
   static const double _preferredVolume = 5000000;
 
+  /// Public alias so the scan loop can tell a thin book from a liquid one
+  /// without duplicating the threshold.
+  static double get preferredVolume => _preferredVolume;
+
   /// Two tiers, because the old hard 5M floor was the whole story behind
   /// "35 coins" on a 300-coin scan:
   ///
@@ -641,6 +687,12 @@ class MarketData {
         // is a *preference*: strong pairs first, quiet ones only to fill the
         // requested 300.
         final wanted = gainers + losers;
+        // Measure the pool BEFORE capping it, otherwise the screen reports
+        // "300 listed" every single time and hides whether the exchange sent
+        // 450 pairs or 80.
+        lastListed = all.length;
+        lastStrongPool =
+            all.where((c) => c.quoteVolume > _preferredVolume).length;
         final universe = selectUniverse(all, wanted);
         final picked = _pick(universe, gainers, losers);
         lastTradable = universe.length;
@@ -803,6 +855,7 @@ class MarketData {
     String tf,
     int lim, {
     List<Candle>? liveFrom,
+    bool scan = false,
   }) async {
     // Deep history (backtest) is an explicit user action for one coin: never
     // served from the scan cache and never blocked by a scan cooldown.
@@ -825,7 +878,7 @@ class MarketData {
         }
       }
       cacheMisses++;
-      final fresh = await _fetchCandles(sym, tf, lim);
+      final fresh = await _fetchCandles(sym, tf, lim, lockedToScanFeed: scan);
       if (fresh.length >= lim) {
         // Keep every bar except the one that is still forming; that one is
         // rebuilt from fresh 15M data, so nothing served from here is stale.
@@ -833,14 +886,15 @@ class MarketData {
       }
       return fresh;
     }
-    return _fetchCandles(sym, tf, lim);
+    return _fetchCandles(sym, tf, lim, lockedToScanFeed: scan);
   }
 
   static Future<List<Candle>> _fetchCandles(
     String sym,
     String tf,
-    int lim,
-  ) async {
+    int lim, {
+    bool lockedToScanFeed = false,
+  }) async {
     // Deep history: Binance can page it, the other feeds cannot.
     if (lim > 1000) {
       try {
@@ -849,9 +903,28 @@ class MarketData {
       } catch (_) {}
     }
 
+    // A symbol must be priced by ONE venue. Falling back to OKX candles for a
+    // Binance-listed pair means the signal is computed on a different market's
+    // price series than the ticker it was ranked from, and the card still says
+    // "(Binance)". Cross-venue candles also have different scales: Binance GAL
+    // traded at 2.54 while the same ticker elsewhere could be far off.
+    //
+    // So the scan only accepts candles from the feed that produced the
+    // universe. If that feed cannot serve the pair, the pair is dropped and
+    // counted — never silently answered by a different exchange.
+    // `lockedToScanFeed` is false for the explicit one-coin backtest and for
+    // deep (paged) history, where Binance is the only venue that can serve the
+    // request and cross-venue is not a risk because the user asked for one
+    // specific chart.
     final full = _feedOrder();
-    var order = full.where((f) => !_isDown(f)).toList();
-    if (order.isEmpty) order = full; // everything marked down: try again
+    var order = full;
+    if (lockedToScanFeed && activeFeed.isNotEmpty) {
+      order = full.where((f) => f.name == activeFeed).toList();
+      if (order.isEmpty) order = full.where((f) => f.name == activeFeed).toList();
+    } else {
+      order = full.where((f) => !_isDown(f)).toList();
+      if (order.isEmpty) order = full;
+    }
 
     for (final feed in order) {
       try {
@@ -2682,10 +2755,10 @@ class _HS extends State<HomeScreen> {
             // cache is warm.
             // 15M first: its fresh tail is what rebuilds the forming 4H bar,
             // so the 4H series never needs its own request once cached.
-            final c15 = await MarketData.candles(sym, '15m', 500);
-            final c4 =
-                await MarketData.candles(sym, '4h', 400, liveFrom: c15);
-            final c1 = await MarketData.candles(sym, '1h', 500);
+            final c15 = await MarketData.candles(sym, '15m', 500, scan: true);
+            final c4 = await MarketData.candles(sym, '4h', 400,
+                liveFrom: c15, scan: true);
+            final c1 = await MarketData.candles(sym, '1h', 500, scan: true);
 
             if (id != _scanId || !mounted) return;
 
@@ -2721,6 +2794,16 @@ class _HS extends State<HomeScreen> {
                   c4Long: c4, c1Long: c1);
               sig ??= Engine.multiTF(sym, w4, w1, w15,
                   c4Long: c4, c1Long: c1, relaxed: true);
+              // A setup on a thin book is not a STRICT trade. The engine cannot
+              // know the pair's liquidity (it only sees candles), so the
+              // decision is made here, where the ticker volume is known.
+              // Live evidence: GAL (2.54, -3.58% stop) came back STRICT at 75%
+              // from the quiet tier -- exactly the coin a 5M/day floor exists to
+              // keep out of the trade list, and exactly what the wide universe
+              // pulled in.
+              if (sig != null && coins[i].quoteVolume <= MarketData.preferredVolume) {
+                sig = sig.asThin();
+              }
               // Nothing strict or relaxed: fall back to the radar candidate so
               // a quiet market still shows what the engine is watching.
               sig ??= Engine.radar(sym, w4, w1, w15,
@@ -2810,12 +2893,16 @@ class _HS extends State<HomeScreen> {
         //   listed low              -> the exchange has few USDT pairs
         //   listed high, picked low -> too few pairs to reach the target
         final strong = MarketData.lastStrong;
+        final listedPool = MarketData.lastListed;
+        final strongPool = MarketData.lastStrongPool;
         // analysed = picked - the coins the engine could not read at all.
         // Printed explicitly so "300 picked" and "300 analysed" can never be
         // confused, and a shortfall always has a name.
         final analysed = _total - _tooYoung - _failed;
-        final funnel = ' • $funnelFeed $raw ticker → $tradable listed '
-            '($strong strong) → $_total picked → $analysed analysed'
+        // listedPool is BEFORE the cap: it is the only number that says whether
+        // the exchange sent a short list or our own floor ate it.
+        final funnel = ' • $funnelFeed $raw ticker → $listedPool listed '
+            '($strongPool strong) → $_total picked → $analysed analysed'
             '${_short4h > 0 ? ' ($_short4h short 4H)' : ''}';
         final small = _total < 120
             ? ' • Sotorkota: matro $_total coin — exchange e eto USDT pair nei'
@@ -3498,6 +3585,21 @@ class _SignalCard extends StatelessWidget {
                 _priceCell('TP%', fmtPct(signal.profitPct), color),
               ],
             ),
+            if (signal.thinVolume) ...<Widget>[
+              const SizedBox(height: 8),
+              Row(
+                children: <Widget>[
+                  const Icon(Icons.water_drop, size: 12, color: K.orange),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      'Thin book (<5M USDT/day) — entry/SL e slippage hote pare',
+                      style: const TextStyle(color: K.orange, fontSize: 10),
+                    ),
+                  ),
+                ],
+              ),
+            ],
             const SizedBox(height: 10),
             Wrap(
               spacing: 6,
