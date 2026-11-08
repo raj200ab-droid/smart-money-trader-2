@@ -1,0 +1,89 @@
+name: Release APK
+
+# Publishing an APK to a GitHub Release gives one tappable .apk link on a phone,
+# instead of a 19 MB artifact ZIP that has to be unzipped on Android.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish (e.g. v5.0.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.16.0'
+          channel: 'stable'
+          cache: true
+
+      - name: Create Android Project
+        run: |
+          cp lib/main.dart /tmp/my_main.dart
+          cp pubspec.yaml /tmp/my_pubspec.yaml
+          flutter create . --org com.smartmoney --project-name smart_money_trader --platforms android
+          cp /tmp/my_main.dart lib/main.dart
+          cp /tmp/my_pubspec.yaml pubspec.yaml
+          wc -l lib/main.dart
+
+      - name: Enable network permission for release builds
+        run: python3 tool/patch_manifest.py
+
+      - name: Get Dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Verify APK has INTERNET permission
+        run: |
+          AAPT=$(ls "$ANDROID_HOME"/build-tools/*/aapt2 | tail -1)
+          "$AAPT" dump permissions build/app/outputs/flutter-apk/app-release.apk \
+            | tee /tmp/permissions.txt
+          grep -q "android.permission.INTERNET" /tmp/permissions.txt \
+            || { echo "::error::release APK has no INTERNET permission"; exit 1; }
+
+      - name: Name the APK after its build stamp
+        run: |
+          # "v5 · 300" -> "v5-300"; anything that is not [A-Za-z0-9.-] becomes '-'
+          STAMP=$(grep -oP "kBuild = '\K[^']+" lib/main.dart | sed 's/[^A-Za-z0-9.-]/-/g; s/--*/-/g')
+          # "5.0.0+5" -> "5.0.0-5": a '+' in a download URL is read as a space
+          VER=$(grep -oP "kVersionName = '\K[^']+" lib/main.dart | tr '+' '-')
+          NAME="smart-money-trader-${STAMP:-build}-${VER}.apk"
+          echo "APK_NAME=$NAME" >> "$GITHUB_ENV"
+          echo "APK_VER=$VER" >> "$GITHUB_ENV"
+          echo "naming: $NAME"
+
+      - name: Copy APK
+        run: cp build/app/outputs/flutter-apk/app-release.apk "$APK_NAME"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          body: |
+            Extracted from `lib/main.dart`:
+
+            - build stamp: `${{ env.APK_VER }}`
+            - release APK with INTERNET permission asserted by CI
+            - technical analysis only, not financial advice
+          files: ${{ env.APK_NAME }}
+          fail_on_unmatched_files: true
