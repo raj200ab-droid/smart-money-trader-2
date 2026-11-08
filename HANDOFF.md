@@ -6,7 +6,7 @@ before touching anything. If something here conflicts with the code, the code
 wins — then update this file.
 
 Last updated: 2026-11-08 · branch `arena/5182e84b-smart-money-trader-2` ·
-build `v5 · 300` / `5.0.0+5` · `lib/main.dart` ≈ 3600 lines ·
+build `v6 · unify` / `6.0.0+6` · `lib/main.dart` ≈ 3600 lines ·
 PR #1 merged; this branch is the 300-coin work
 
 ---
@@ -169,6 +169,25 @@ Asked for 300 coins, then: *"কোন ধরনের চেঞ্জ করব
   `/home/user/smt-verify/verify_4h_cache.py`)
 - warm cache: 3× the coins for 2× the requests (600), 66 s scan, 58 MB
 - device numbers for this build are **not in yet** — that is the next open item
+
+## 8c. v6 · unify — dead score removed, EQH/EQL repaired (2026-11-08)
+
+The user noticed that `analyze()` computed `buyScore/sellScore`/`buyConf`/`sellConf`
+that `multiTF` never read, and that EQH/EQL was display-only. Both were real.
+
+- **deleted** 83 lines + 7 fields of scoring nothing consumed (`sweep`, `bos`,
+  `choch` included). `multiTF` is now the only score in the program.
+- **EQH/EQL was unreachable**: 0.1×ATR over *swing* pivots = 0/48 true.
+  Now internal pivots at 0.5×ATR = 29%. Still **display-only**, on purpose.
+- **`internalFresh`/`internalEvent` were never assigned**, so the WATCH pass's
+  internal-break trigger and the RADAR fallback could never fire. Wired up.
+- EQH/EQL as a *score/veto* was measured (84 paired series, 4 regimes) and moved
+  the result by at most one trade — see NOTES.md §10 for the table. Not shipped
+  as a rule; the code comment says why.
+
+`/home/user/smt-verify/mirror.py` is the Python mirror again (the old `smt-mirror`
+was gone). Fix `swings()` if it ever drifts — it is verified against the naive
+form.
 
 ## 9. Open items
 

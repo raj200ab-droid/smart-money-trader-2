@@ -152,3 +152,50 @@ on the wrong side), which would have left a hole in the 4H series.
 
 **Still open:** device numbers for `v5 · 300` (scan time, cache hit ratio,
 STRICT/WATCH/RADAR counts) — the CI APK has not been run yet.
+
+---
+
+## 10. v6 · unify — the dead score, EQH/EQL, and internal freshness (2026-11-08)
+
+**Asked:** "analyze()-র নিজের buyScore/sellScore ... multiTF কখনো পড়ে না ... eqh/eql শুধু
+UI-তে দেখানো হয় ... এই সমস্যাটা সমাধান করে ঠিক করে দাও". Chosen approach: **B (unify)**
+with EQH/EQL as a **zone/veto**, not a sweep trigger.
+
+### Three defects, all real
+
+| # | defect | evidence | fix |
+|---|---|---|---|
+| 1 | `analyze()` built a whole second score (`buyScore/sellScore`, `buyConf/sellConf`, `sweep`, `bos`, `choch`) that **no caller read** | `grep` showed 2 refs each: the field and its construction site | deleted: 83 lines of scoring + 7 fields. `multiTF` is the only score |
+| 2 | `equalHighs/equalLows` sourced from **swing** pivots at **0.1×ATR** | measured **0/48** timeframes true; consecutive swing pivots sit a median **4.9 ATR** apart, so the condition is unreachable. The UI "Liquidity" row always read None | sourced from **internal** pivots (len 5, LUX) at **0.5×ATR** → **29%** hit rate |
+| 3 | `internalFresh`/`internalEvent` were **never assigned** in `analyze()` | field initialised from a local that did not exist → always false/'' | computed from `internalRecent`; the WATCH internal-break trigger and RADAR fallback can now fire |
+
+Defect 3 was found while doing defect 1, and it is the biggest of the three: the
+relaxed pass had a trigger that could never fire.
+
+### The measured answer on scoring EQH/EQL (do not re-litigate without new data)
+
+Paired test, identical candles, 12 synthetic series × 4 regimes (mixed / trend /
+range / volatile), walk-forward with the app's own rules:
+
+| variant | trades | closed | WR | totalR | avgR |
+|---|---|---|---|---|---|
+| OLD (EQH/EQL unused, 0.1×ATR on swings) | 86 | 76 | 50.0% | +36.7 | +0.483 |
+| FIXED (internal pivots, 0.5×ATR) | 86 | 76 | 50.0% | +36.7 | +0.483 |
+| + veto, pool within 0.5 ATR | 86 | 76 | 50.0% | +36.7 | +0.483 |
+| + veto, pool within 1.0 ATR | 87 | 77 | 49.4% | +35.7 | +0.464 |
+| + veto, pool within 1.5 ATR | 87 | 77 | 49.4% | +35.7 | +0.464 |
+| + veto, pool within 2.5 ATR | 87 | 78 | 50.0% | +37.7 | +0.484 |
+
+The veto **does fire** (instrumented: 288 arms over 6 series, 24,746 calls) but it
+either skips one trade or flips one SELL to a BUY: **43/43 → 43/44**. At 86
+trades that is noise. So EQH/EQL stays **display-only** and the code says so.
+Shipping it as a filter would have been a number this project could not defend.
+
+### Mirror added
+
+`/home/user/smt-verify/mirror.py` — Python mirror of `multiTF`, `analyze` and
+`Backtester.walk`, with `swings()` verified against the naive form (40 random
+series, exact match) and sped up from 29 s to 4 s per walk. `measure.py` /
+`measure4.py` / `measure5.py` are the drivers. No exchange access here (only
+GitHub hosts are reachable), so all of it is synthetic — it proves a change is
+not broken, not that it is profitable. That caveat applies to every number above.
