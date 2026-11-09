@@ -998,3 +998,5 @@ trip (VIP8–9), not the 0.25% the app models or the 0.20% VIP0 taker rate.
 **Scalp mode is shipped and labelled, but it is not profitable at retail fees.**
 This is the same shape as the v7 fixed-TP lesson: a feature that looks like more
 opportunity is a worse trade once costs are counted.
+
+Released as tag `v17.0.0` (commit `be559bd`, CI run `42686518272` success, release run `42687019960` success). Asset `smart-money-trader-v17-scalp-17.0.0-20.apk`, 20.6 MB. Release notes carry the negative measurement table so the warning travels with the download.
