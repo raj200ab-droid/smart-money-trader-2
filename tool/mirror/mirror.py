@@ -109,17 +109,34 @@ def structure_ob(c, from_index, to_index, bullish, atr_value):
             'type': 'bullish' if bullish else 'bearish', 'index': best_index}
 
 
+# LUX's orderBlockMitigationInput defaults to High/Low: an order block dies when
+# price trades *through* it, not merely when a candle closes beyond it. The app
+# shipped the CLOSE variant, which keeps blocks alive longer and therefore emits
+# more signals. MITIGATION selects which one to measure.
+MITIGATION = 'highlow'  # LUX default, shipped from v13 | 'close' = the old rule
+
+
 def active_obs(obs, c):
     out = []
     for o in obs:
         broken = False
         for i in range(o['index'] + 1, len(c)):
-            if o['type'] == 'bearish' and c[i]['close'] < o['low']:
-                broken = True
-                break
-            if o['type'] == 'bullish' and c[i]['close'] > o['high']:
-                broken = True
-                break
+            if MITIGATION == 'highlow':
+                # bearish block lives below price; it dies when price wicks above
+                # its high. bullish block dies when price wicks below its low.
+                if o['type'] == 'bearish' and c[i]['high'] > o['high']:
+                    broken = True
+                    break
+                if o['type'] == 'bullish' and c[i]['low'] < o['low']:
+                    broken = True
+                    break
+            else:
+                if o['type'] == 'bearish' and c[i]['close'] < o['low']:
+                    broken = True
+                    break
+                if o['type'] == 'bullish' and c[i]['close'] > o['high']:
+                    broken = True
+                    break
         if not broken:
             out.append(o)
     return out

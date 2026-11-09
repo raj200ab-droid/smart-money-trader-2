@@ -707,3 +707,61 @@ Binance 3745 ticker (N delisted) → N listed (N strong) → N picked → N anal
 `delisted` is rows the exchange sent for symbols it no longer trades; `stale
 data` is coins dropped because their candles ended hours ago. Both are printed
 because a silent filter is how this went unnoticed for ten versions.
+
+## 19. v13 — order-block mitigation: LUX's High/Low, because CLOSE put stops
+## behind structure price had already broken
+
+The LuxAlgo script defaults `orderBlockMitigationInput` to **High/Low**. The app
+had shipped the CLOSE variant since the first port. That is not a cosmetic
+difference: under CLOSE a block stays "active" until a candle *closes* beyond
+it, so after price has already wicked through the zone the block is still
+offered as a place to lean — and the stop goes behind a level that is no longer
+intact.
+
+Measured over identical synthetic candles (12 seeds × 4 regimes, closed trades
+only, 0.25% round-trip cost):
+
+| mitigation | n | WR | gross | net | avgNet |
+|---|---|---|---|---|---|
+| close (shipped until v12.1) | 196 | 32.1% | +8.0R | −12.0R | −0.061 |
+| **highlow (v13)** | 193 | **33.7%** | **+17.0R** | **−2.8R** | **−0.014** |
+
+Signal count barely moved (−1.5%), so this is not "fewer trades" — it is the
+same trades taken against blocks that still exist.
+
+### Per regime, to check it is not one lucky bucket
+
+| regime | close net | highlow net | delta |
+|---|---|---|---|
+| trend | −0.1R | **+4.5R** | +4.6R |
+| range | −4.5R | −1.2R | +3.3R |
+| mixed | −2.8R | −1.5R | +1.3R |
+| volatile | −4.6R | −4.6R | **±0.0** |
+
+3 of 4 improved, 1 unchanged, 0 worse. The gain is concentrated in trending
+conditions, which is the case the rule change predicts (in a trend the surviving
+blocks are the meaningful ones). Volatile conditions are unaffected — mitigation
+style does not matter when price is whipping through everything anyway.
+
+**Honesty about strength:** the 4-regime mean delta is +2.30R with a 95% CI of
+[−0.55, +5.15]. The direction is consistent, the magnitude is not established.
+What distinguishes this from the v7 fixed-TP mistake is the signature: there the
+win rate rose while total R *fell*. Here gross R, net R **and** win rate all
+move the same way, and no regime regresses.
+
+### What was deliberately NOT added
+
+The same audit found six LUX features the app lacks — `drawLevels` (MTF
+highs/lows), `displayStructure` (candle colouring), `drawLabel` (HH/HL/LH/LL),
+`drawHighLowSwings`, `showSwingsInput`, and `alertcondition`. All six are
+**visual**: they draw on a chart the app does not render, and none of them
+touches a score, gate or price. They were left out.
+
+Two other differences turned out not to be differences at all:
+
+- **OB "two sets"** — LUX has `internalOrderBlocks` and `swingOrderBlocks`, but
+  `showSwingOrderBlocksInput` defaults to **false**, so the chart shows only
+  internal blocks. The app matches the default.
+- **EQH/EQL threshold** (LUX `0.1 × ATR(200)` + 3-bar confirmation vs the app's
+  `0.5 × ATR`) — `eqh`/`eql` are computed and displayed but never enter a score
+  or a gate anywhere. Changing the threshold would alter a label, not a signal.

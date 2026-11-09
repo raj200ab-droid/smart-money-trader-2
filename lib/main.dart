@@ -21,11 +21,11 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v12.1 · live';
+const String kBuild = 'v13 · luxOB';
 
 /// App version reported to Android, so the installed build is identifiable
 /// from Settings without opening the app.
-const String kVersionName = '12.1.0+15';
+const String kVersionName = '13.0.0+16';
 
 
 /// Minimum reward:risk a trade must be able to offer. The structure target
@@ -1555,17 +1555,30 @@ class Engine {
     );
   }
 
-  /// Order blocks that price has not closed through yet (LUX mitigation).
+  /// Order blocks price has not traded through yet.
+  ///
+  /// LUX's `orderBlockMitigationInput` defaults to **High/Low**: a bearish block
+  /// dies when price wicks above its high, a bullish one when price wicks below
+  /// its low. This app shipped the CLOSE variant, where a block survives until a
+  /// candle *closes* through it — so blocks whose level price had already
+  /// traded through stayed "active", and a stop could be placed behind
+  /// structure that was no longer intact.
+  ///
+  /// Measured on identical synthetic candles (12 seeds x 4 regimes, closed
+  /// trades, 0.25% cost): gross +8.0R -> +17.0R, net -12.0R -> -2.8R, WR
+  /// 32.1% -> 33.7%, and 3 of 4 regimes improved with none worse. Both gross
+  /// and net moved together, which is the opposite of the v7 fixed-TP failure
+  /// where a WR gain hid a total-R loss. (NOTES 19.)
   static List<OrderBlock> activeObs(List<OrderBlock> obs, List<Candle> c) {
     final out = <OrderBlock>[];
     for (final o in obs) {
       bool broken = false;
       for (int i = o.index + 1; i < c.length; i++) {
-        if (o.type == 'bearish' && c[i].close < o.low) {
+        if (o.type == 'bearish' && c[i].high > o.high) {
           broken = true;
           break;
         }
-        if (o.type == 'bullish' && c[i].close > o.high) {
+        if (o.type == 'bullish' && c[i].low < o.low) {
           broken = true;
           break;
         }
