@@ -1071,3 +1071,10 @@ This is the third bug of the same family — v16 `999 bar age`, v17.1 swing labe
 on a scalp screen, v17.2 version on the filename. The pattern: **a fact copied
 into a second place with no test tying the two together.** Where it can be
 computed from one source, it should be.
+
+Released as tag `v17.2.0` (commit `ea35841`, CI `42696311324` success, release
+run `42696835170` success). Asset
+`smart-money-trader-v17.2-honest-filename-17.2.0-22.apk`, 20.6 MB — stamp and
+version tail finally agree. `v17.1.0` stays published with a "superseded by
+v17.2.0" note rather than being deleted: deleting a release someone may already
+have downloaded hides the mistake instead of documenting it.
