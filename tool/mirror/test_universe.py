@@ -112,13 +112,22 @@ def check(name, cond, detail=''):
 
 def main():
     ok = True
-    print('universe rules')
+    for target in (300, 400):
+        ok &= check_target(target)
+    print()
+    print('all universe tests PASS' if ok else 'SOME TESTS FAILED')
+    return 0 if ok else 1
+
+
+def check_target(target):
+    ok = True
+    print(f'universe rules (target {target})')
 
     rows = snapshot()
     listed = [c for c in rows if is_listed(c['symbol'], c['price'])]
     strong = [c for c in listed if c['volume'] > PREFERRED_VOLUME]
-    universe = select_universe(rows, 300)
-    picked = pick(universe, 150, 150)
+    universe = select_universe(rows, target)
+    picked = pick(universe, target // 2, target // 2)
 
     ok &= check('only USDT pairs are listed',
                 all(c['symbol'].endswith('USDT') for c in listed))
@@ -128,37 +137,37 @@ def main():
                 all(c['price'] > 0 for c in listed))
     ok &= check('strong tier is a subset of listed',
                 all(c in listed for c in strong))
-    ok &= check('300 coins are selected', len(universe) == 300,
+    ok &= check(f'{target} coins are selected', len(universe) == target,
                 f'{len(listed)} listed -> {len(strong)} strong -> {len(universe)}')
-    ok &= check('300 coins reach the engine', len(picked) == 300, f'{len(picked)} picked')
+    ok &= check(f'{target} coins reach the engine', len(picked) == target,
+                f'{len(picked)} picked')
 
     # the old behaviour, for contrast
-    old_picked = pick(strong, 150, 150)
+    old_picked = pick(strong, target // 2, target // 2)
     print(f'        v10 behaviour on the same snapshot: {len(old_picked)} analysed')
 
     # a quiet market must still reach 300 when enough pairs are listed
     quiet = [coin(f'Q{i}USDT', 1.0, rnd_vol, -abs(0.1 + i * 0.01))
              for i, rnd_vol in enumerate(random.Random(3).uniform(1e4, 1e6)
                                          for _ in range(400))]
-    quiet_picked = pick(select_universe(quiet, 300), 150, 150)
-    ok &= check('quiet day still reaches 300', len(quiet_picked) == 300,
+    quiet_picked = pick(select_universe(quiet, target), target // 2, target // 2)
+    ok &= check(f'quiet day still reaches {target}', len(quiet_picked) == target,
                 f'{len(quiet_picked)} picked')
 
     # a small exchange must report an honest shortfall, not invent coins
     small = [coin(f'T{i}USDT', 1.0, 1e5, (i % 5) - 2) for i in range(80)]
-    small_picked = pick(select_universe(small, 300), 150, 150)
+    small_picked = pick(select_universe(small, target), target // 2, target // 2)
     ok &= check('small exchange reports the truth', len(small_picked) == 80,
                 f'{len(small_picked)} picked from 80 listed')
 
     # leveraged tokens must never appear
     lev = [coin('BTCUPUSDT'), coin('ETH3LUSDT'), coin('BTCUSDT')]
-    lev_picked = pick(select_universe(lev, 300), 150, 150)
+    lev_picked = pick(select_universe(lev, target), target // 2, target // 2)
     ok &= check('leveraged tokens never selected',
                 [c['symbol'] for c in lev_picked] == ['BTCUSDT'])
 
     print()
-    print('all universe tests PASS' if ok else 'SOME TESTS FAILED')
-    return 0 if ok else 1
+    return ok
 
 
 if __name__ == '__main__':

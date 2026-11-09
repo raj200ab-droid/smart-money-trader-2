@@ -21,11 +21,11 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v13 · luxOB';
+const String kBuild = 'v14 · 400coin';
 
 /// App version reported to Android, so the installed build is identifiable
 /// from Settings without opening the app.
-const String kVersionName = '13.0.0+16';
+const String kVersionName = '14.0.0+17';
 
 
 /// Minimum reward:risk a trade must be able to offer. The structure target
@@ -616,6 +616,15 @@ class MarketData {
   /// usable: see [selectUniverse].
   static const double _preferredVolume = 5000000;
 
+  /// How many coins a scan analyses. Binance lists ~400-500 USDT pairs and
+  /// ~150-200 of those clear 5M USDT/day, so 400 is the largest number that can
+  /// be filled honestly without reaching deep into the quiet tail.
+  ///
+  /// Cost at 400: weight 6/coin cold (2400 total), 4/coin warm. Measured
+  /// against the 4500/min meter: ~90 s cold, ~60 s warm, inside the 5-minute
+  /// refresh slot.
+  static const int scanTarget = 400;
+
   /// Public alias so the scan loop can tell a thin book from a liquid one
   /// without duplicating the threshold.
   static double get preferredVolume => _preferredVolume;
@@ -654,8 +663,8 @@ class MarketData {
   /// Binance is geo-blocked in many regions; if every mirror fails we walk
   /// the other feeds, because each one exposes the same USDT pairs.
   static Future<List<CoinData>> marketScan({
-    int gainers = 150,
-    int losers = 150,
+    int gainers = scanTarget ~/ 2,
+    int losers = scanTarget ~/ 2,
   }) async {
     var errors = <String>[];
 
@@ -766,10 +775,11 @@ class MarketData {
   /// scoring and tiers are untouched. The first scan is cold, the rest reuse.
   static final Map<String, List<Candle>> _cache4h = <String, List<Candle>>{};
   static final Map<String, DateTime> _cache4hAt = <String, DateTime>{};
-  /// Enough for a full 300-coin universe plus a margin. At 320 the cache
+  /// Enough for a full 400-coin universe plus a margin. At 320 the cache
   /// evicted the coldest 4H series on a wide scan, so the second scan
-  /// refetched them and the hit counter never warmed up.
-  static const int _cache4hMax = 400;
+  /// refetched them and the hit counter never warmed up; a cache smaller than
+  /// the universe can never reach a useful hit rate by construction.
+  static const int _cache4hMax = 460;
   /// Expire a little *early* rather than late: a 4H series that is one bar
   /// short has a hole in it, while refetching a minute too soon costs nothing.
   static const Duration _cacheEarlyExpiry = Duration(minutes: 1);
@@ -2766,7 +2776,10 @@ class _HS extends State<HomeScreen> {
     }
 
     try {
-      final coins = await MarketData.marketScan(gainers: 150, losers: 150);
+      final coins = await MarketData.marketScan(
+        gainers: MarketData.scanTarget ~/ 2,
+        losers: MarketData.scanTarget ~/ 2,
+      );
       if (id != _scanId || !mounted) return;
 
       _scratch = List<_CoinOut?>.filled(coins.length, null);
@@ -2798,7 +2811,7 @@ class _HS extends State<HomeScreen> {
       // budget, so extra workers only add concurrency, never request rate.
       // 6 keeps a 300-coin scan near 90 s on a cold cache without bursty
       // behaviour that looks like an attack to the exchange.
-      final workers = coins.length > 120 ? 6 : 4;
+      final workers = coins.length > 200 ? 8 : (coins.length > 120 ? 6 : 4);
 
       // Coins are analysed in chunks: each chunk is committed to the list as a
       // whole. Analysing 300 coins in one setState per coin rebuilds the list
@@ -3009,7 +3022,9 @@ class _HS extends State<HomeScreen> {
             '($strongPool strong) → $_total picked → $analysed analysed'
             '${_short4h > 0 ? ' ($_short4h short 4H)' : ''}'
             '${_delisted > 0 ? ' ($_delisted stale data)' : ''}';
-        final small = _total < 120
+        // Warn below half the target: at 400 that is 200. A universe this
+        // small is a data story, not a market story.
+        final small = _total < MarketData.scanTarget ~/ 2
             ? ' • Sotorkota: matro $_total coin — exchange e eto USDT pair nei'
             : '';
         _msg = _signals.isEmpty

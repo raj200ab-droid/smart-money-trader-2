@@ -765,3 +765,56 @@ Two other differences turned out not to be differences at all:
 - **EQH/EQL threshold** (LUX `0.1 × ATR(200)` + 3-bar confirmation vs the app's
   `0.5 × ATR`) — `eqh`/`eql` are computed and displayed but never enter a score
   or a gate anywhere. Changing the threshold would alter a label, not a signal.
+
+## 20. v14 — the universe target is 400, not 300
+
+Binance lists roughly **400–500 USDT spot pairs**, of which ~150–200 clear
+5M USDT/day. A 300-coin target was therefore always going to be mostly quiet
+tier; 400 is the largest number that can be filled without descending deep into
+pairs nobody trades.
+
+`MarketData.scanTarget = 400` is now the single source of truth. It feeds the
+scan call (`gainers: 200, losers: 200`), the `marketScan` defaults, the warning
+threshold (half the target) and the 4H cache bound.
+
+### Changed with it
+
+| item | before | after | why |
+|---|---|---|---|
+| scan target | 300 | **400** | the request |
+| `_cache4hMax` | 400 | **460** | a cache smaller than the universe can never hit |
+| worker pool | ≤6 | **8** above 200 coins | HTTP-bound, not meter-bound |
+| small-universe warning | <120 | **<200** | half the target, scales with it |
+
+### Cost at 400 coins
+
+Weight per coin is 6 cold (15m 500 = 2, 4h 400 = 2, 1h 500 = 2) and 4 warm
+once the 4H cache is populated:
+
+| workers | cache | HTTP work | meter floor | scan |
+|---|---|---|---|---|
+| 6 | cold | 90 s | 32 s | **90 s** |
+| 6 | warm | 60 s | 21 s | **60 s** |
+| 8 | cold | 68 s | 32 s | **68 s** |
+| 8 | warm | 45 s | 21 s | **45 s** |
+
+Every configuration is **HTTP-bound, not meter-bound** — the 4500/min budget is
+never the limit at 400 coins, so raising the worker pool from 6 to 8 is safe and
+does not risk a 429. A cold scan still finishes well inside the 5-minute
+refresh slot.
+
+### Verified
+
+`tool/mirror/test_universe.py` is now parametrised over both targets and asserts,
+on a Binance-shaped snapshot (455 listed, 165 strong):
+
+```
+target 300: 455 listed -> 165 strong -> 300 selected -> 300 picked
+target 400: 455 listed -> 165 strong -> 400 selected -> 400 picked
+```
+
+plus: a quiet day still reaches the target, an 80-pair exchange honestly reports
+80, and leveraged/stable tokens never appear — at **both** targets.
+
+The engine is untouched. Windows, scores, gates, targets and stops are the same;
+the scan simply hands it 400 candidates instead of 300.

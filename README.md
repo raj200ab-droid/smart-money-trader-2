@@ -41,8 +41,11 @@ pass with a lower threshold and no counter-trend gate. Watch signals are marked
 
 ## Why the list can be empty
 
-The scanner analyses **300 coins** — the top 150 gainers plus the top 150 losers
-of the last 24h, and the count is a target it actually meets. Stablecoins and
+The scanner analyses **400 coins** — the top 200 gainers plus the top 200 losers
+of the last 24h, and the count is a target it actually meets. Binance lists
+400-500 USDT pairs, of which only ~150-200 clear 5M USDT/day, so 400 is the
+largest universe that can be filled without descending into pairs nobody
+trades. Stablecoins and
 leveraged tokens are excluded; liquidity is a *preference*, not a filter: pairs
 above 5M USDT/day are chosen first and quieter pairs only fill the remaining
 places. That ordering matters because a hard 5M floor used to be applied inside
