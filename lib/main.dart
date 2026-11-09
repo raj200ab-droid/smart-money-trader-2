@@ -21,12 +21,35 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v16 · honest';
+const String kBuild = 'v17 · scalp';
 
 /// App version reported to Android, so the installed build is identifiable
 /// from Settings without opening the app.
-const String kVersionName = '16.0.0+19';
+const String kVersionName = '17.0.0+20';
 
+
+/// How the three timeframes are stacked.
+///
+/// [swing] is the original: 4H bias, 1H zones, 15M trigger.
+/// [scalp] keeps every rule, score and gate identical and only swaps the
+/// horizons -- 30M bias, 15M zones, 5M trigger. 10M was requested but no spot
+/// exchange publishes a 10-minute candle (Binance/Bybit/OKX offer 3/15/30;
+/// MEXC does not even offer 3M), so 5M stands in as the trigger.
+enum TradeMode {
+  swing,
+  scalp;
+
+  /// Timeframe that provides the bias.
+  String get biasTf => this == TradeMode.swing ? '4H' : '30M';
+
+  /// Timeframe that provides the order blocks, FVGs and premium/discount.
+  String get zoneTf => this == TradeMode.swing ? '1H' : '15M';
+
+  /// Timeframe that provides the live break trigger.
+  String get triggerTf => this == TradeMode.swing ? '15M' : '5M';
+
+  String get label => this == TradeMode.swing ? 'Swing' : 'Scalp';
+}
 
 /// Minimum reward:risk a trade must be able to offer. The structure target
 /// (15M swing) is accepted only at or above this; otherwise the target falls
@@ -305,6 +328,7 @@ class TradeSignal {
     required this.watch,
     required this.tier,
     this.thinVolume = false,
+    this.mode = TradeMode.swing,
   });
 
   final String symbol;
@@ -338,6 +362,10 @@ class TradeSignal {
   /// more than the edge. Such a signal is never printed as STRICT.
   final bool thinVolume;
 
+  /// Which horizon stack produced this signal, so the card labels the rows with
+  /// the timeframes actually used (4H/1H/15M or 30M/15M/5M).
+  final TradeMode mode;
+
   /// 'STRICT' (full confluence), 'WATCH' (relaxed trigger/threshold) or
   /// 'RADAR' (bias and trigger present, zone or score still missing). RADAR is
   /// explicitly a candidate list, never a trade instruction.
@@ -370,6 +398,7 @@ class TradeSignal {
       watch: true,
       tier: tier == 'RADAR' ? 'RADAR' : 'WATCH',
       thinVolume: true,
+      mode: mode,
     );
   }
 
@@ -821,20 +850,25 @@ class MarketData {
   /// time is missing from it. That gap is harmless until the forming bar
   /// itself closes — at that moment the cache would be one bar short and has
   /// to be refetched. So the horizon is exactly: last closed bar + 2 x 4H.
-  static bool _cache4hFresh(String sym) {
-    final closedBar = _cache4h[sym];
+  /// Cache key. The series differ per timeframe, so a symbol alone is not a
+  /// key: switching to scalp mode writes 30M bars under the same symbol and
+  /// would poison the 4H entries (and be poisoned by them).
+  static String _cacheKey(String sym, String tf) => '$tf|$sym';
+
+  static bool _cache4hFresh(String key) {
+    final closedBar = _cache4h[key];
     if (closedBar == null || closedBar.isEmpty) return false;
-    if (_cache4hAt[sym] == null) return false;
+    if (_cache4hAt[key] == null) return false;
     final horizon = DateTime.fromMillisecondsSinceEpoch(
       closedBar.last.openTime + 2 * _ms4h,
     );
     return DateTime.now().isBefore(horizon.subtract(_cacheEarlyExpiry));
   }
 
-  static List<Candle> _cache4hPut(String sym, List<Candle> closed) {
-    _cache4h.remove(sym);
-    _cache4h[sym] = closed;
-    _cache4hAt[sym] = DateTime.now();
+  static List<Candle> _cache4hPut(String key, List<Candle> closed) {
+    _cache4h.remove(key);
+    _cache4h[key] = closed;
+    _cache4hAt[key] = DateTime.now();
     // Dart maps keep insertion order, so the first key is the coldest.
     while (_cache4h.length > _cache4hMax) {
       final cold = _cache4h.keys.first;
@@ -897,8 +931,9 @@ class MarketData {
     if (deep) return _fetchCandles(sym, tf, lim);
 
     if (tf == '4h' && liveFrom != null) {
-      final closed = _cache4h[sym];
-      if (closed != null && _cache4hFresh(sym)) {
+      final key = _cacheKey(sym, tf);
+      final closed = _cache4h[key];
+      if (closed != null && _cache4hFresh(key)) {
         final merged = _merge4h(closed, liveFrom, lim);
         // The cache holds only CLOSED bars, so it is by construction one bar
         // short of what the exchange returns. Demanding >= lim here made every
@@ -915,7 +950,7 @@ class MarketData {
       if (fresh.length >= lim) {
         // Keep every bar except the one that is still forming; that one is
         // rebuilt from fresh 15M data, so nothing served from here is stale.
-        _cache4hPut(sym, fresh.sublist(0, fresh.length - 1));
+        _cache4hPut(key, fresh.sublist(0, fresh.length - 1));
       }
       return fresh;
     }
@@ -1309,8 +1344,12 @@ class MarketData {
 
   static String _bybitInterval(String tf) {
     switch (tf) {
+      case '5m':
+        return '5';
       case '15m':
         return '15';
+      case '30m':
+        return '30';
       case '1h':
         return '60';
       case '4h':
@@ -1351,8 +1390,12 @@ class MarketData {
 
   static String _okxBar(String tf) {
     switch (tf) {
+      case '5m':
+        return '5m';
       case '15m':
         return '15m';
+      case '30m':
+        return '30m';
       case '1h':
         return '1H';
       case '4h':
@@ -1402,8 +1445,13 @@ class MarketData {
 
   static String _mexcInterval(String tf) {
     switch (tf) {
+      // MEXC has no 3m interval; 5m is the shortest it publishes besides 1m.
+      case '5m':
+        return '5m';
       case '15m':
         return '15m';
+      case '30m':
+        return '30m';
       case '1h':
         return '60m';
       case '4h':
@@ -2020,12 +2068,21 @@ class Engine {
     List<Candle>? c15Long,
     bool relaxed = false,
     List<String>? trace,
+    TradeMode mode = TradeMode.swing,
   }) {
     if (c4.length < 60 || c1.length < 60 || c15.length < 60) return null;
 
-    final t4 = analyzeLong('4H', c4, c4Long ?? c4);
-    final t1 = analyzeLong('1H', c1, c1Long ?? c1);
-    final t15 = analyze('15M', c15);
+    // The parameters keep their swing names (c4/c1/c15) so every caller and the
+    // Python mirror stay readable, but in scalp mode they carry the 30M / 15M /
+    // 5M series instead. Only the horizons change: the weights below, the
+    // gates, the stops and the targets are identical in both modes.
+    final String bTf = mode.biasTf;
+    final String zTf = mode.zoneTf;
+    final String gTf = mode.triggerTf;
+
+    final t4 = analyzeLong(bTf, c4, c4Long ?? c4);
+    final t1 = analyzeLong(zTf, c1, c1Long ?? c1);
+    final t15 = analyze(gTf, c15);
     final px = c15.last.close;
     if (px <= 0) return null;
 
@@ -2042,11 +2099,11 @@ class Engine {
 
     if (bull4) {
       buy += 30;
-      bC.add('4H bullish bias');
+      bC.add('$bTf bullish bias');
     }
     if (bear4) {
       sell += 30;
-      sC.add('4H bearish bias');
+      sC.add('$bTf bearish bias');
     }
 
     final buyOb = buyZone(t1.obs, px);
@@ -2067,11 +2124,11 @@ class Engine {
 
     if (bull4 && buyOb != null) {
       buy += 25;
-      bC.add('1H bullish OB');
+      bC.add('$zTf bullish OB');
     }
     if (bear4 && sellOb != null) {
       sell += 25;
-      sC.add('1H bearish OB');
+      sC.add('$zTf bearish OB');
     }
 
     final bullFvg = t1.fvgs.any((f) =>
@@ -2082,11 +2139,11 @@ class Engine {
     // A fair value gap counts as the zone when no order block is available.
     if (bull4 && bullFvg) {
       buy += buyOb == null ? 20 : 10;
-      bC.add('1H bullish FVG');
+      bC.add('$zTf bullish FVG');
     }
     if (bear4 && bearFvg) {
       sell += sellOb == null ? 20 : 10;
-      sC.add('1H bearish FVG');
+      sC.add('$zTf bearish FVG');
     }
 
     // Trigger: the freshest 15M swing break as long as price is still holding
@@ -2102,29 +2159,29 @@ class Engine {
     if (triggerBull) {
       buy += 20;
       bC.add(t15.breakPattern == 'CHoCH'
-          ? '15M bullish CHoCH'
-          : '15M bullish BOS');
+          ? '$gTf bullish CHoCH'
+          : '$gTf bullish BOS');
     } else if (internalBull) {
       buy += 20;
-      bC.add('15M internal bullish break');
+      bC.add('$gTf internal bullish break');
     }
     if (triggerBear) {
       sell += 20;
       sC.add(t15.breakPattern == 'CHoCH'
-          ? '15M bearish CHoCH'
-          : '15M bearish BOS');
+          ? '$gTf bearish CHoCH'
+          : '$gTf bearish BOS');
     } else if (internalBear) {
       sell += 20;
-      sC.add('15M internal bearish break');
+      sC.add('$gTf internal bearish break');
     }
 
     if (t15.volumeSpike) {
       if (bull4) {
         buy += 5;
-        bC.add('15M volume spike');
+        bC.add('$gTf volume spike');
       } else if (bear4) {
         sell += 5;
-        sC.add('15M volume spike');
+        sC.add('$gTf volume spike');
       }
     }
 
@@ -2133,19 +2190,19 @@ class Engine {
     final zoneNow = t1.zoneOf;
     if (zoneNow == 'Premium') {
       buy -= 25;
-      sC.add('1H premium zone');
+      sC.add('$zTf premium zone');
     }
     if (zoneNow == 'Discount') {
       sell -= 25;
-      bC.add('1H discount zone');
+      bC.add('$zTf discount zone');
     }
     if (zoneNow == 'Breakout' && bull4) {
       buy += 5;
-      bC.add('1H breakout');
+      bC.add('$zTf breakout');
     }
     if (zoneNow == 'Breakdown' && bear4) {
       sell += 5;
-      sC.add('1H breakdown');
+      sC.add('$zTf breakdown');
     }
 
     final atr1 = t1.atr > 0 ? t1.atr : px * 0.01;
@@ -2162,20 +2219,20 @@ class Engine {
     if (trace != null) {
       trace
         ..add(t4.trend > 0
-            ? '4H bullish'
+            ? '$bTf bullish'
             : t4.trend < 0
-                ? '4H bearish'
-                : '4H trend nei')
+                ? '$bTf bearish'
+                : '$bTf trend nei')
         ..add(buyOb != null || sellOb != null
-            ? '1H order block ache'
+            ? '$zTf order block ache'
             : (bullFvg || bearFvg)
-                ? '1H FVG ache'
-                : '1H zone nei')
+                ? '$zTf FVG ache'
+                : '$zTf zone nei')
         ..add(trigBuy || trigSell
-            ? '15M break valid'
+            ? '$gTf break valid'
             : (internalBull || internalBear)
-                ? '15M internal break'
-                : '15M trigger nei')
+                ? '$gTf internal break'
+                : '$gTf trigger nei')
         ..add('score ${(buy > sell ? buy : sell).round()}/${threshold.round()}'
             '${zoneNow == 'Premium' || zoneNow == 'Discount' ? ' • $zoneNow penalty' : ''}');
       // The structure floor can veto a setup whose score already passed, and
@@ -2238,9 +2295,9 @@ class Engine {
       final target = swingTarget >= minTarget ? swingTarget : entry + risk * 2;
 
       if (t15.breakAge > 2) {
-        bC.add('15M bullish break ${t15.breakAge} bar age');
+        bC.add('$gTf bullish break ${t15.breakAge} bar age');
       } else if (t15.breakAge < 0) {
-        bC.add('15M break nai (age unknown)');
+        bC.add('$gTf break nai (age unknown)');
       }
       if (t4.structureConflict) {
         bC.add('Sotorkota: long-window 4H structure ulto dike');
@@ -2277,6 +2334,7 @@ class Engine {
         eql: t1.eql,
         watch: relaxed,
         tier: relaxed ? 'WATCH' : 'STRICT',
+        mode: mode,
       );
     }
 
@@ -2314,9 +2372,9 @@ class Engine {
       final target = swingTarget <= maxTarget ? swingTarget : entry - risk * 2;
 
       if (t15.breakAge > 2) {
-        sC.add('15M bearish break ${t15.breakAge} bar age');
+        sC.add('$gTf bearish break ${t15.breakAge} bar age');
       } else if (t15.breakAge < 0) {
-        sC.add('15M break nai (age unknown)');
+        sC.add('$gTf break nai (age unknown)');
       }
       if (t4.structureConflict) {
         sC.add('Sotorkota: long-window 4H structure ulto dike');
@@ -2344,6 +2402,7 @@ class Engine {
         eql: t1.eql,
         watch: relaxed,
         tier: relaxed ? 'WATCH' : 'STRICT',
+        mode: mode,
       );
     }
 
@@ -2361,12 +2420,17 @@ class Engine {
     List<Candle> c15, {
     List<Candle>? c4Long,
     List<Candle>? c1Long,
+    TradeMode mode = TradeMode.swing,
   }) {
     if (c4.length < 60 || c1.length < 60 || c15.length < 60) return null;
 
-    final t4 = analyzeLong('4H', c4, c4Long ?? c4);
-    final t1 = analyzeLong('1H', c1, c1Long ?? c1);
-    final t15 = analyze('15M', c15);
+    final String bTf = mode.biasTf;
+    final String zTf = mode.zoneTf;
+    final String gTf = mode.triggerTf;
+
+    final t4 = analyzeLong(bTf, c4, c4Long ?? c4);
+    final t1 = analyzeLong(zTf, c1, c1Long ?? c1);
+    final t15 = analyze(gTf, c15);
     final px = c15.last.close;
     if (px <= 0) return null;
 
@@ -2412,12 +2476,12 @@ class Engine {
             : px - risk * 2);
 
     final why = <String>[
-      bull ? '4H bullish bias' : '4H bearish bias',
+      bull ? '$bTf bullish bias' : '$bTf bearish bias',
       if (t15.breakEvent.isNotEmpty)
-        '15M ${bull ? 'bullish' : 'bearish'} '
+        '$gTf ${bull ? 'bullish' : 'bearish'} '
             '${t15.breakPattern.isEmpty ? 'BOS' : t15.breakPattern}'
       else
-        '15M internal break',
+        '$gTf internal break',
       if (ob == null && gap.isEmpty) 'Zone nei — wait koro' else 'Zone ache',
       if (t1.zoneOf == 'Premium' || t1.zoneOf == 'Discount')
         '${t1.zoneOf} penalty',
@@ -2442,6 +2506,7 @@ class Engine {
       eql: t1.eql,
       watch: true,
       tier: 'RADAR',
+      mode: mode,
     );
   }
 }
@@ -2784,6 +2849,10 @@ class _HS extends State<HomeScreen> {
   int _delisted = 0;
   final List<String> _nearMiss = <String>[];
   int _scanId = 0;
+
+  /// Which horizon stack this screen is scanning. Changing it restarts the
+  /// scan, because the candles and the cache are per-timeframe.
+  TradeMode _mode = TradeMode.swing;
   String _feed = '';
   Timer? _timer;
 
@@ -2909,12 +2978,17 @@ class _HS extends State<HomeScreen> {
             // (3.2x the 1200/min budget), which rate-limits the scan and makes
             // coins fail. At 500/500/400 it is 1800, and 1200 once the 4H
             // cache is warm.
-            // 15M first: its fresh tail is what rebuilds the forming 4H bar,
-            // so the 4H series never needs its own request once cached.
-            final c15 = await MarketData.candles(sym, '15m', 500, scan: true);
-            final c4 = await MarketData.candles(sym, '4h', 400,
+            // The trigger timeframe is fetched FIRST so the slow (bias) series
+            // can be rebuilt from its fresh tail, which is what makes the 4H
+            // cache possible. In swing mode that is 15m -> 4h; in scalp mode
+            // 5m -> 30m (and 15m for the zone series).
+            final trigTf = _mode.triggerTf.toLowerCase();
+            final biasTf = _mode.biasTf.toLowerCase();
+            final zoneTf = _mode.zoneTf.toLowerCase();
+            final c15 = await MarketData.candles(sym, trigTf, 500, scan: true);
+            final c4 = await MarketData.candles(sym, biasTf, 400,
                 liveFrom: c15, scan: true);
-            final c1 = await MarketData.candles(sym, '1h', 500, scan: true);
+            final c1 = await MarketData.candles(sym, zoneTf, 500, scan: true);
 
             if (id != _scanId || !mounted) return;
 
@@ -2956,9 +3030,9 @@ class _HS extends State<HomeScreen> {
               // Strict SMC confluence first; fall back to the relaxed pass so
               // the list is not empty in quiet markets (flagged WATCH).
               var sig = Engine.multiTF(sym, w4, w1, w15,
-                  c4Long: c4, c1Long: c1);
+                  c4Long: c4, c1Long: c1, mode: _mode);
               sig ??= Engine.multiTF(sym, w4, w1, w15,
-                  c4Long: c4, c1Long: c1, relaxed: true);
+                  c4Long: c4, c1Long: c1, relaxed: true, mode: _mode);
               // A setup on a thin book is not a STRICT trade. The engine cannot
               // know the pair's liquidity (it only sees candles), so the
               // decision is made here, where the ticker volume is known.
@@ -2972,7 +3046,7 @@ class _HS extends State<HomeScreen> {
               // Nothing strict or relaxed: fall back to the radar candidate so
               // a quiet market still shows what the engine is watching.
               sig ??= Engine.radar(sym, w4, w1, w15,
-                  c4Long: c4, c1Long: c1);
+                  c4Long: c4, c1Long: c1, mode: _mode);
 
               final why = <String>[];
               if (sig == null) {
@@ -2984,7 +3058,8 @@ class _HS extends State<HomeScreen> {
                   _biasNoSetup++;
                 }
                 Engine.multiTF(sym, w4, w1, w15,
-                    c4Long: c4, c1Long: c1, relaxed: true, trace: why);
+                    c4Long: c4, c1Long: c1,
+                    relaxed: true, trace: why, mode: _mode);
               }
               _scratch[i] = _CoinOut(sig, why.isEmpty ? null : '$sym: '
                   '${why.join(' • ')}');
@@ -3167,6 +3242,46 @@ class _HS extends State<HomeScreen> {
       color: K.panel,
       child: Column(
         children: <Widget>[
+          // Mode switch. Both modes run the identical engine: same weights,
+          // same gates, same stops and targets. Only the horizon stack changes
+          // (4H/1H/15M vs 30M/15M/5M), which is why switching restarts the
+          // scan -- the candles and the cache are per-timeframe.
+          Row(
+            children: <Widget>[
+              for (final m in TradeMode.values)
+                GestureDetector(
+                  onTap: () {
+                    if (_mode == m) return;
+                    setState(() => _mode = m);
+                    run();
+                  },
+                  child: Container(
+                    margin: const EdgeInsets.only(right: 6),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: _mode == m
+                          ? K.green.withOpacity(0.18)
+                          : K.panel2,
+                      borderRadius: BorderRadius.circular(5),
+                      border: Border.all(
+                        color: _mode == m ? K.green : K.panel2,
+                      ),
+                    ),
+                    child: Text(
+                      '${m.label} ${m.biasTf}/${m.zoneTf}/${m.triggerTf}',
+                      style: TextStyle(
+                        color: _mode == m ? K.green : K.muted,
+                        fontSize: 10,
+                        fontWeight:
+                            _mode == m ? FontWeight.bold : FontWeight.normal,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 8),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: <Widget>[
@@ -3535,7 +3650,7 @@ class _HS extends State<HomeScreen> {
                             : K.green),
                 _detailRow('Pattern', s.pattern,
                     s.pattern == 'CHoCH' ? K.orange : K.green),
-                _detailRow('1H zone', s.zone,
+                _detailRow('${s.mode.zoneTf} zone', s.zone,
                     s.zone == 'Discount'
                         ? K.green
                         : s.zone == 'Premium'

@@ -931,3 +931,70 @@ without a break" — it was that the card **claimed** a break it did not have.
 `509 listed → 400 picked` with only **71 of 509 strong** (v11.1 had 165 of 455).
 That drop remains unexplained and is the next thing to settle from a device
 scan.
+
+## 23. v17 — scalp mode, and the honest measurement of it
+
+Requested: a mode that analyses 3/10/15/30 minutes, multiple timeframes,
+following the existing rules.
+
+### 10M does not exist
+
+No major spot exchange publishes a 10-minute candle — Binance, Bybit and OKX
+offer 3/15/30, and MEXC does not even offer 3M. Resampling ten 1M bars into a
+10M bar is arithmetically fine but multiplies the request weight by ten, which
+is not feasible at a 400-coin scan. The user chose **5M** as the substitute.
+
+Final stack, confirmed with the user:
+
+| mode | bias | zones | trigger |
+|---|---|---|---|
+| swing | 4H | 1H | 15M |
+| **scalp** | **30M** | **15M** | **5M** |
+
+### Nothing in the engine changed
+
+`multiTF` and `radar` take a `TradeMode` and read three strings from it
+(`biasTf`, `zoneTf`, `triggerTf`). Every weight, gate, stop rule, target rule and
+confidence clamp is the same code, and the parameters keep their swing names
+(`c4`, `c1`, `c15`) so the Python mirror stays readable. In scalp mode they
+simply carry the 30M / 15M / 5M series.
+
+The UI switch restarts the scan, because the candles and the cache are
+per-timeframe.
+
+### A real bug this exposed: the 4H cache was keyed by symbol only
+
+`_cache4h[sym]`. Switching to scalp mode writes **30M** bars under the same
+symbol, which would have poisoned every 4H entry (and been poisoned by them —
+a 30M series served as a 4H series is silently wrong data, not an error). The
+key is now `'$tf|$sym'`.
+
+### The measurement the user should read before using it
+
+Identical price paths, identical rules, 12 seeds × 4 regimes, closed trades,
+0.25% round trip:
+
+| mode | n | WR | gross | net | avgStop | cost/trade |
+|---|---|---|---|---|---|---|
+| swing | 193 | 33.7% | +17.0R | −2.8R | 3.54% | 0.103R |
+| **scalp** | **2496** | **31.7%** | **+116.6R** | **−200.6R** | 3.72% | **0.127R** |
+
+Per regime, scalp is negative in **all four**: mixed −92.7R, trend −35.3R,
+range −23.2R, volatile −49.4R.
+
+Read the two lines together:
+
+```
+gross per trade  +0.047R      <- there IS a real edge
+cost  per trade  -0.127R      <- but the fee is 2.7x the edge
+net   per trade  -0.080R      <- every trade loses on average
+```
+
+Scalping does not fail because the signals are bad. It fails because a 5M/30M
+trade holds for minutes, so the round-trip fee is a much larger fraction of R
+than on a swing trade. Break-even on this sample needs roughly **0.045%** round
+trip (VIP8–9), not the 0.25% the app models or the 0.20% VIP0 taker rate.
+
+**Scalp mode is shipped and labelled, but it is not profitable at retail fees.**
+This is the same shape as the v7 fixed-TP lesson: a feature that looks like more
+opportunity is a worse trade once costs are counted.

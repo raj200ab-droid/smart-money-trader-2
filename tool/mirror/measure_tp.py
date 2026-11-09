@@ -59,6 +59,52 @@ def gen(seed, n15=4200, regime='mixed'):
     return bucket(path, T4), bucket(path, T1), bucket(path, T15)
 
 
+def gen_scalp(seed, n5=9000, regime='mixed'):
+    """Same generator, bucketed to the scalp horizons: 30M / 15M / 5M.
+
+    Identical price path and volatility regimes -- only the bucket sizes
+    change, so a swing-vs-scalp comparison is not confounded by a different
+    market.
+    """
+    T30 = 30 * 60 * 1000
+    T5 = 5 * 60 * 1000
+    rnd = random.Random(seed)
+    start = 1730000000000
+    start -= start % T30
+    drift, vol = {'trend': (0.00006, 0.004), 'range': (0.0, 0.004),
+                  'volatile': (0.00002, 0.012), 'mixed': (0.00004, 0.006)}[regime]
+    px, path = 100.0, []
+    for i in range(n5):
+        if regime == 'mixed' and i % 2100 == 0:
+            drift = rnd.choice([-0.00008, 0.0, 0.00008])
+            vol = rnd.choice([0.003, 0.006, 0.011])
+        r = rnd.gauss(drift, vol)
+        new = max(0.01, px * (1 + r))
+        path.append({'open': px,
+                     'high': max(px, new) * (1 + abs(rnd.gauss(0, vol * 0.25))),
+                     'low': min(px, new) * (1 - abs(rnd.gauss(0, vol * 0.25))),
+                     'close': new, 'volume': abs(rnd.gauss(1000, 400)) + 1})
+        px = new
+
+    def bucket(series, step):
+        out, cur = [], None
+        for idx, k in enumerate(series):
+            b = ((start + idx * T5) // step) * step
+            if cur is None or cur['openTime'] != b:
+                cur = {'openTime': b, 'closeTime': b + step - 1, 'open': k['open'],
+                       'high': k['high'], 'low': k['low'], 'close': k['close'],
+                       'volume': k['volume']}
+                out.append(cur)
+            else:
+                cur['high'] = max(cur['high'], k['high'])
+                cur['low'] = min(cur['low'], k['low'])
+                cur['close'] = k['close']
+                cur['volume'] += k['volume']
+        return out
+
+    return bucket(path, T30), bucket(path, T15), bucket(path, T5)
+
+
 def job(args):
     regime, seed, mode, pct = args
     c4, c1, c15 = gen(seed, regime=regime)
