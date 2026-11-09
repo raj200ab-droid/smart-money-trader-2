@@ -16,6 +16,7 @@ SWING_LEN = 50
 INTERNAL_LEN = 5
 STRICT = 60.0
 WATCH = 40.0
+TIGHT_STOP = False   # measured: tightening the stop to the 15M swing made net worse
 MIN_RR = 1.5
 MAX_STOP_PCT = 8.0    # measured: capping at 2.5% cut the only net-positive bucket
 
@@ -424,6 +425,14 @@ def multi_tf(c4, c1, c15, relaxed=False, tp_mode='swing', tp_pct=1.05):
                 sl = t15['swingLow']['price'] - atr1 * 0.25
             else:
                 sl = px - atr1 * 2
+            # v15: risk and reward on the same horizon. If the 15M swing low is
+            # tighter than the 1H block, use it -- otherwise a 15M swing target
+            # can never sit 1.5x a 1H stop away and the target always falls back
+            # to a mechanical 2R.
+            if TIGHT_STOP and t15['swingLow']:
+                tight = t15['swingLow']['price'] - atr1 * 0.25
+                if entry > tight > sl:
+                    sl = tight
             if sl >= entry:
                 sl = entry - atr1
             risk = entry - sl
@@ -453,6 +462,10 @@ def multi_tf(c4, c1, c15, relaxed=False, tp_mode='swing', tp_pct=1.05):
                 sl = t15['swingHigh']['price'] + atr1 * 0.25
             else:
                 sl = px + atr1 * 2
+            if TIGHT_STOP and t15['swingHigh']:
+                tight = t15['swingHigh']['price'] + atr1 * 0.25
+                if entry < tight < sl:
+                    sl = tight
             if sl <= entry:
                 sl = entry + atr1
             risk = sl - entry

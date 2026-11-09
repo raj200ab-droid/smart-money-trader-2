@@ -818,3 +818,72 @@ plus: a quiet day still reaches the target, an 80-pair exchange honestly reports
 
 The engine is untouched. Windows, scores, gates, targets and stops are the same;
 the scan simply hands it 400 candidates instead of 300.
+
+## 21. v15 — what the v14 device screenshot got wrong
+
+The v14 scan ran: `400 / 400`, `Binance 3745 ticker (3227 delisted) → 509
+listed (71 strong) → 400 picked → 400 analysed (3 short)`, 4 signal · 43 watch
+· 4 radar, tabs `ALL 51 / BUY 5 / SELL 46`.
+
+Two of those numbers were wrong, one was a real trade-quality problem, and one
+was correct.
+
+### Wrong 1 — "3227 delisted" (fixed)
+
+`lastDeadSymbols = data.length - live.length`. `data` is `/ticker/24hr`, which
+returns every quote asset (~3745 rows: BNBBTC, ETHTRY, BTCEUR…). `live` is the
+USDT-only set from `/exchangeInfo` (~518). Subtracting one from the other calls
+every non-USDT pair "delisted" — 86% of the exchange, which no venue does.
+
+Now the count only includes symbols that *look* tradable to us (USDT, not a
+stablecoin, not leveraged) but are not marked TRADING. The real number should
+be in the tens.
+
+### Wrong 2 — every card is RR 1:2.00 exactly (diagnosed, revert kept)
+
+All four STRICT cards: risk 3.24% / 4.90% / 5.35% / 5.81%, reward exactly 2x
+each. That is the `kMinRR` fallback firing on 100% of signals, i.e. **the 15M
+swing target has never qualified since v10**.
+
+Cause: the stop comes from 1H structure (`sellOb.high + 0.25 ATR(1H)`) while the
+target is a 15M swing. A 15M swing almost never sits 1.5x a 1H stop away, so the
+gate always rejects it and the trade becomes a mechanical 2R with no structural
+objective.
+
+**The obvious fix was measured and rejected.** Letting the 15M swing act as the
+stop when it is tighter (12 seeds × 4 regimes, 0.25% cost):
+
+| variant | n | WR | gross | net | 2R-fallback |
+|---|---|---|---|---|---|
+| loose (shipped) | 193 | 33.7% | +17.0R | **−2.8R** | 70% |
+| tight (proposed) | 201 | 32.3% | +15.9R | **−9.1R** | 67% |
+
+Per regime: trend +2.9R, mixed −2.7R, range **−6.5R**, volatile 0.0R. It only
+reduced the fallback rate by 3 points while making the stop tighter (worse
+R-multiples) and net worse in two regimes. **Reverted.** The fallback rate is
+*not* the problem; a tighter stop is simply a worse trade here.
+
+### Wrong 3 — NVDAB is a tokenized stock, not crypto (fixed)
+
+`NVDABUSDT` is a Binance bStock (an NVIDIA token listed Oct 2026). It is a real
+spot USDT pair — exchangeInfo does not flag it, the delisted check passes, the
+volume is real — but a tokenized equity gaps on the underlying market's hours
+and a 5.8% structural stop on it is not comparable to one on SOL. It is now
+excluded by an explicit symbol list (`_tokenizedStocks`), since matching a `B`
+suffix would misfire on real tickers.
+
+### Correct — BUY 5 / SELL 46 was not a bug
+
+All four STRICT cards carry `4H bearish bias` on four unrelated symbols at once.
+In a broad selloff a 46:5 skew is the market, not the engine. The structure
+floor is symmetric (`bullBlocked` mirrors `bearBlocked`). The header numbers are
+also consistent: `4 signal` counts STRICT only, while `ALL 51` = 4 STRICT + 43
+watch + 4 radar.
+
+### Still open
+
+`509 listed → 400 picked` means ~109 pairs were dropped between the listed pool
+and the universe, and only 71 of 509 cleared the 5M/day floor (down from 165 of
+455 in v11.1). That drop is **not explained**. It may be a genuine 24h volume
+collapse in the quiet tier, or the exchangeInfo filter interacting with the
+ticker list. The next scan's funnel line settles it.

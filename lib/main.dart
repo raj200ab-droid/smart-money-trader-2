@@ -21,11 +21,11 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v14 · 400coin';
+const String kBuild = 'v15 · clean';
 
 /// App version reported to Android, so the installed build is identifiable
 /// from Settings without opening the app.
-const String kVersionName = '14.0.0+17';
+const String kVersionName = '15.0.0+18';
 
 
 /// Minimum reward:risk a trade must be able to offer. The structure target
@@ -588,6 +588,23 @@ class MarketData {
     'XUSDUSDT',
   };
 
+  /// Binance's tokenized-stock products (bStocks, listed Oct 2026) are ordinary
+  /// spot USDT symbols: exchangeInfo does not flag them, volume is real, and
+  /// the delisted check passes. But a tokenized equity is not a crypto pair --
+  /// it tracks a share price, gaps on the underlying market's hours, and a 5.8%
+  /// structural stop on it is not comparable to one on SOL.
+  ///
+  /// They use a `B` suffix on the underlying ticker (NVDA -> NVDAB, MDBB,
+  /// PENGB, UVXYB, BBB). Matching a suffix alone would be unsafe, so this is an
+  /// explicit list, extended as Binance lists more.
+  static const Set<String> _tokenizedStocks = <String>{
+    'NVDABUSDT',
+    'MDBBUSDT',
+    'PENGBUSDT',
+    'UVXYBUSDT',
+    'BBBUSDT',
+  };
+
   static const List<String> _leveragedSuffixes = <String>[
     'UPUSDT',
     'DOWNUSDT',
@@ -606,6 +623,7 @@ class MarketData {
     if (!c.symbol.endsWith('USDT')) return false;
     if (c.symbol == 'USDTUSDT') return false;
     if (_skip.contains(c.symbol)) return false;
+    if (_tokenizedStocks.contains(c.symbol)) return false;
     for (final suffix in _leveragedSuffixes) {
       if (c.symbol.endsWith(suffix)) return false;
     }
@@ -1096,12 +1114,19 @@ class MarketData {
         // BUY at 2.5420 while the real Binance chart the user opened showed
         // GALA at 0.00153.
         final live = await _binanceLiveSymbols();
-        final list = data
+        final parsed = data
             .map((e) => CoinData.fromJson(e as Map<String, dynamic>))
-            .where((c) => live.isEmpty || live.contains(c.symbol))
-            .where(_isListed)
             .toList();
-        lastDeadSymbols = live.isEmpty ? 0 : data.length - live.length;
+        final list =
+            parsed.where((c) => live.isEmpty || live.contains(c.symbol)).toList();
+        // Count only pairs that LOOK tradable to us (USDT, not a stablecoin,
+        // not leveraged) but that Binance no longer marks TRADING. Comparing
+        // the whole ticker list against a USDT-only live set counted BNBBTC,
+        // ETHTRY and every other quote asset as "delisted" -- on the device
+        // that printed 3227 of 3745, i.e. 86%, which no exchange does.
+        lastDeadSymbols = live.isEmpty
+            ? 0
+            : parsed.where((c) => _isListed(c) && !live.contains(c.symbol)).length;
         if (list.isNotEmpty) return list;
       } catch (e) {
         last = e;
@@ -2195,6 +2220,7 @@ class Engine {
         sl = px - atr1 * 2;
       }
 
+
       if (sl >= entry) sl = entry - atr1;
       final risk = entry - sl;
       if (risk <= 0 || risk / entry > 0.08) return null;
@@ -2260,6 +2286,7 @@ class Engine {
       } else {
         sl = px + atr1 * 2;
       }
+
 
       if (sl <= entry) sl = entry + atr1;
       final risk = sl - entry;
