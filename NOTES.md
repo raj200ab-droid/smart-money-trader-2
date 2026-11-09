@@ -887,3 +887,47 @@ and the universe, and only 71 of 509 cleared the 5M/day floor (down from 165 of
 455 in v11.1). That drop is **not explained**. It may be a genuine 24h volume
 collapse in the quiet tier, or the exchangeInfo filter interacting with the
 ticker list. The next scan's funnel line settles it.
+
+## 22. v16 — two cards that lied about their own confluence
+
+The v14 DODO card: `WATCH (relaxed)`, **90% confidence**, RR 1:2.00, risk −4.77%,
+with five confirmations — one of which read **`15M bullish break 999 bar age`**.
+
+### Lie 1 — `999` is a sentinel that reached the screen
+
+```dart
+breakAge: lastBreak == null ? 999 : c.length - 1 - lastBreak.bar
+if (t15.breakAge > 2) bC.add('15M bullish break ${t15.breakAge} bar age');
+```
+
+`999` meant "no break found", but `999 > 2` is true, so a signal that had **no
+break at all** printed a confirmation claiming one, aged 999 bars. 999 × 15M is
+10.4 days — outside the 200-bar window entirely. A fabricated confluence,
+sitting alongside real ones, on a card the user is meant to trust.
+
+Fixed: the sentinel is now **−1**, and a negative age prints
+`15M break nai (age unknown)` instead of a fake number.
+
+### Lie 2 — a WATCH card scoring higher than every STRICT card
+
+STRICT needs 60, WATCH needs 40, and **both render the raw score as
+"NN% confidence"**. On the device the relaxed DODO card showed **90%** while the
+STRICT cards showed 70–75%. A less reliable setup displaying a bigger number is
+worse than useless.
+
+Fixed: a relaxed signal's displayed confidence is clamped to **59**, just under
+the strict threshold. It can no longer claim more than the gate it actually
+passed. (The engine still scores it identically; only the number the user acts
+on is bounded.)
+
+### Not a bug — why DODO had no break yet still fired
+
+`trigBuy = triggerBull || (relaxed && internalBull)`. The relaxed pass accepts a
+15M **internal** break, which is by design. The defect was never "it fired
+without a break" — it was that the card **claimed** a break it did not have.
+
+### Still open
+
+`509 listed → 400 picked` with only **71 of 509 strong** (v11.1 had 165 of 455).
+That drop remains unexplained and is the next thing to settle from a device
+scan.

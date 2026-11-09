@@ -21,11 +21,11 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v15 · clean';
+const String kBuild = 'v16 · honest';
 
 /// App version reported to Android, so the installed build is identifiable
 /// from Settings without opening the app.
-const String kVersionName = '15.0.0+18';
+const String kVersionName = '16.0.0+19';
 
 
 /// Minimum reward:risk a trade must be able to offer. The structure target
@@ -1922,7 +1922,11 @@ class Engine {
       internalFresh: internalFresh,
       internalEvent: internalLast?.event ?? '',
       breakLevel: lastBreak?.pivot.price ?? px,
-      breakAge: lastBreak == null ? 999 : c.length - 1 - lastBreak.bar,
+      // -1 means "no break was found". It used to be 999, which the
+      // confirmation builder happily read as a real age of 999 bars and printed
+      // "15M bullish break 999 bar age" on signals that had no break at all --
+      // a fabricated confluence. (Device, v14: DODO, WATCH relaxed, 90%.)
+      breakAge: lastBreak == null ? -1 : c.length - 1 - lastBreak.bar,
       structureConflict: false,
     );
   }
@@ -2235,6 +2239,8 @@ class Engine {
 
       if (t15.breakAge > 2) {
         bC.add('15M bullish break ${t15.breakAge} bar age');
+      } else if (t15.breakAge < 0) {
+        bC.add('15M break nai (age unknown)');
       }
       if (t4.structureConflict) {
         bC.add('Sotorkota: long-window 4H structure ulto dike');
@@ -2247,7 +2253,19 @@ class Engine {
         entry: entry,
         sl: sl,
         tp: target,
-        confidence: buy.clamp(0.0, 100.0).toDouble(),
+        // A WATCH signal failed the strict gate, so its raw score is NOT
+        // comparable to a STRICT one: both paths render as "NN% confidence",
+        // yet the WATCH path only had to clear 40 instead of 60. On the device
+        // that produced a relaxed card at 90% sitting above STRICT cards at
+        // 70-75% -- a less reliable setup showing a bigger number.
+        //
+        // Cap the displayed confidence for relaxed signals just below the
+        // strict threshold so the number can never claim more than the gate it
+        // actually passed.
+        confidence: (relaxed
+                ? buy.clamp(0.0, 59.0)
+                : buy.clamp(0.0, 100.0))
+            .toDouble(),
         confirmations: bC,
         time: DateTime.now(),
         tf4h: t4.structure,
@@ -2297,6 +2315,8 @@ class Engine {
 
       if (t15.breakAge > 2) {
         sC.add('15M bearish break ${t15.breakAge} bar age');
+      } else if (t15.breakAge < 0) {
+        sC.add('15M break nai (age unknown)');
       }
       if (t4.structureConflict) {
         sC.add('Sotorkota: long-window 4H structure ulto dike');
@@ -2309,7 +2329,10 @@ class Engine {
         entry: entry,
         sl: sl,
         tp: target,
-        confidence: sell.clamp(0.0, 100.0).toDouble(),
+        confidence: (relaxed
+                ? sell.clamp(0.0, 59.0)
+                : sell.clamp(0.0, 100.0))
+            .toDouble(),
         confirmations: sC,
         time: DateTime.now(),
         tf4h: t4.structure,
