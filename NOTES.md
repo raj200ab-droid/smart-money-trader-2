@@ -1078,3 +1078,49 @@ run `42696835170` success). Asset
 version tail finally agree. `v17.1.0` stays published with a "superseded by
 v17.2.0" note rather than being deleted: deleting a release someone may already
 have downloaded hides the mistake instead of documenting it.
+
+## 26. Fresh-BOS trigger — requested, measured, and it loses
+
+The ask: "when 5M gives a BOS, confirm me right then" — i.e. stop accepting a
+break that price is merely still sitting beyond (`5M bullish break 21 bar age`
+= 105 minutes old on the device).
+
+This is a pure *filter*: it only removes signals, never adds or rescales one.
+So it could be measured exactly, with no engine rewrite. `mirror.multi_tf` /
+`mirror.walk` gained `fresh_only` / `fresh_bars`; every other weight, gate,
+stop and target is untouched.
+
+Scalp horizons (30M/15M/5M), 8 seeds × 4 regimes, 0.25% round trip, closed
+trades only:
+
+| variant | n | WR | gross | net | R/trade |
+|---|---|---|---|---|---|
+| **holding** (shipped) | 1710 | 33.2% | +166.9 | **−53.0** | **+0.098** |
+| fresh0 (break on last closed bar only) | 1487 | 32.0% | +112.3 | −77.4 | +0.076 |
+| fresh1 (≤1 bar) | 1495 | 32.2% | +118.4 | −72.1 | +0.079 |
+| fresh2 (≤2 bars) | 1495 | 32.2% | +118.4 | −72.1 | +0.079 |
+
+Per regime (net R):
+
+| regime | holding | fresh0 |
+|---|---|---|
+| mixed | −56.0 | −56.4 |
+| trend | −7.3 | **+3.3** |
+| range | **+14.8** | −10.2 |
+| volatile | −4.6 | −14.1 |
+
+**Reading it honestly.** Requiring freshness costs **−24.4R** over the sample
+(−223 trades). It is not just fewer trades — it is a worse trade: gross
+R/trade falls from +0.098 to +0.076, so the trades it removes are *better than
+average*. The likely reason is mechanical: entering on the break bar puts the
+entry right at the pivot with no evidence price holds beyond it, whereas the
+shipped rule waits for that evidence. `fresh1` and `fresh2` are identical to
+`fresh0` in practice, so widening the window by a bar changes nothing — this is
+not a threshold-tuning problem.
+
+It is not uniformly worse: in the **trend** regime fresh is the only variant
+that is positive (+3.3R vs −7.3R), and in **range** it is much worse
+(−10.2R vs +14.8R). A regime-conditional version is plausible but is a new
+rule, and nothing here measures it.
+
+Not shipped to the app. `tk` measurement only.

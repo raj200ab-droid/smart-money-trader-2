@@ -336,7 +336,8 @@ def analyze(c, tf='15M'):
 
 
 # --------------------------------------------------------------------- multiTF
-def multi_tf(c4, c1, c15, relaxed=False, tp_mode='swing', tp_pct=1.05):
+def multi_tf(c4, c1, c15, relaxed=False, tp_mode='swing', tp_pct=1.05,
+             fresh_only=False, fresh_bars=0):
     """Mirror of Engine.multiTF.
 
     tp_mode='swing' reproduces the app: TP is the 15M swing high/low when it is
@@ -376,8 +377,17 @@ def multi_tf(c4, c1, c15, relaxed=False, tp_mode='swing', tp_pct=1.05):
     if bear4 and bear_fvg:
         sell += 20 if sell_ob is None else 10
 
-    trigger_bull = t15['breakEvent'] == 'BULLISH' and px > t15['breakLevel']
-    trigger_bear = t15['breakEvent'] == 'BEARISH' and px < t15['breakLevel']
+    # `fresh_only` is the "confirm the BOS when it happens" mode: the swing
+    # break must be at most `fresh_bars` closed bars old. Without it a 5M BOS
+    # stays a trigger for the whole run of bars price holds beyond the pivot
+    # (device: "5M bullish break 21 bar age" = 105 minutes). With it, the same
+    # signal has to fire on the break itself.
+    fresh = 0 <= t15['breakAge'] <= fresh_bars
+
+    trigger_bull = (t15['breakEvent'] == 'BULLISH' and px > t15['breakLevel']
+                    and (fresh or not fresh_only))
+    trigger_bear = (t15['breakEvent'] == 'BEARISH' and px < t15['breakLevel']
+                    and (fresh or not fresh_only))
     if trigger_bull:
         buy += 20
     if trigger_bear:
@@ -491,7 +501,7 @@ def multi_tf(c4, c1, c15, relaxed=False, tp_mode='swing', tp_pct=1.05):
 
 # ---------------------------------------------------------------- walk forward
 def walk(c4, c1, c15, step=1, window=200, window4h=400, max_trades=200,
-         tp_mode='swing', tp_pct=1.05):
+         tp_mode='swing', tp_pct=1.05, fresh_only=False, fresh_bars=0):
     """Mirror of Backtester.run. No look-ahead, one trade at a time."""
     trades = []
     n = len(c15)
@@ -518,8 +528,11 @@ def walk(c4, c1, c15, step=1, window=200, window4h=400, max_trades=200,
               or aligned(c4, c15[i]['closeTime'], 120))
         if w1 is None or w4 is None:
             continue
-        sig = (multi_tf(w4, w1, w15, tp_mode=tp_mode, tp_pct=tp_pct)
-               or multi_tf(w4, w1, w15, relaxed=True, tp_mode=tp_mode, tp_pct=tp_pct))
+        sig = (multi_tf(w4, w1, w15, tp_mode=tp_mode, tp_pct=tp_pct,
+                        fresh_only=fresh_only, fresh_bars=fresh_bars)
+               or multi_tf(w4, w1, w15, relaxed=True, tp_mode=tp_mode,
+                           tp_pct=tp_pct, fresh_only=fresh_only,
+                           fresh_bars=fresh_bars))
         if sig is None:
             continue
         is_buy = sig['direction'] == 'BUY'
