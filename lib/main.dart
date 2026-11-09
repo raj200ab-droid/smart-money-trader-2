@@ -21,11 +21,16 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v17.1 · scalp labels';
+const String kBuild = 'v17.2 · honest filename';
 
-/// App version reported to Android, so the installed build is identifiable
-/// from Settings without opening the app.
-const String kVersionName = '17.0.0+20';
+/// App version reported in the UI so an installed build is identifiable.
+///
+/// MUST stay equal to `version:` in pubspec.yaml. It was a second, hand-kept
+/// copy of the same fact and nothing checked the two agreed, so v17.1.0 shipped
+/// an APK named `...-17.0.0-20.apk` while the code was `17.1.0+21`. The release
+/// workflow now reads pubspec.yaml directly and `test_stamps` fails the build
+/// if this line drifts again.
+const String kVersionName = '17.2.0+22';
 
 
 /// How the three timeframes are stacked.

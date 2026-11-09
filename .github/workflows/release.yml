@@ -43,6 +43,9 @@ jobs:
       - name: Enable network permission for release builds
         run: python3 tool/patch_manifest.py
 
+      - name: Stamp test
+        run: python3 tool/mirror/test_stamps.py
+
       - name: Get Dependencies
         run: flutter pub get
 
@@ -64,8 +67,11 @@ jobs:
         run: |
           # "v5 · 300" -> "v5-300"; anything that is not [A-Za-z0-9.-] becomes '-'
           STAMP=$(grep -oP "kBuild = '\K[^']+" lib/main.dart | sed 's/[^A-Za-z0-9.-]/-/g; s/--*/-/g')
-          # "5.0.0+5" -> "5.0.0-5": a '+' in a download URL is read as a space
-          VER=$(grep -oP "kVersionName = '\K[^']+" lib/main.dart | tr '+' '-')
+          # "17.1.0+21" -> "17.1.0-21": a '+' in a download URL is read as a space.
+          # Read from pubspec.yaml, which is the single source of truth: the
+          # duplicated kVersionName constant in main.dart was never bumped and
+          # shipped a v17.1.0 APK named "...-17.0.0-20.apk".
+          VER=$(grep -oP '^version:\s*\K\S+' pubspec.yaml | tr '+' '-')
           NAME="smart-money-trader-${STAMP:-build}-${VER}.apk"
           echo "APK_NAME=$NAME" >> "$GITHUB_ENV"
           echo "APK_VER=$VER" >> "$GITHUB_ENV"

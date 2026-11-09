@@ -1040,3 +1040,34 @@ computed but never read, so age is display-only. The only real freshness gate is
 on the relaxed WATCH pass (`internalFresh`, ≤4 bars of the len-5 internal
 series). That is deliberate — it is the LUX behaviour where a BOS line stays
 valid for a run of bars, not one candle.
+
+## 25. v17.2 — the APK filename lied about its own version
+
+`v17.1.0` shipped as `smart-money-trader-v17.1-scalp-labels-17.0.0-20.apk`.
+The stamp said v17.1, the version tail said `17.0.0-20`. Both came from
+`lib/main.dart` — two hand-kept constants describing the same build:
+
+| constant | used by | v17.1.0 value |
+|---|---|---|
+| `kBuild` | APK filename prefix, on-screen status | `v17.1 · scalp labels` ✔ |
+| `kVersionName` | **APK filename tail only** | `17.0.0+20` ✘ stale |
+| `version:` in `pubspec.yaml` | Gradle `versionName` / Settings | `17.1.0+21` ✔ |
+
+Nothing in the repo read `kVersionName`, so bumping `pubspec.yaml` — which is
+what Gradle actually uses — left the filename behind. A user comparing the
+downloaded filename to Settings → App info would see two different versions.
+
+Fix: the release workflow now derives the tail from `pubspec.yaml` (the single
+source of truth), and `tool/mirror/test_stamps.py` fails if `kVersionName`
+drifts from it or if the workflow goes back to reading the Dart constant.
+The test is wired into **both** workflows before the Flutter build, so a stale
+stamp costs 20 seconds instead of a wasted 3-minute APK build.
+
+Proved the guard on the real failure: restoring `kVersionName = '17.0.0+20'`
+makes `test_stamps.py` exit 1 with
+`kVersionName is '17.0.0+20' but pubspec version is '17.1.0+21'`.
+
+This is the third bug of the same family — v16 `999 bar age`, v17.1 swing labels
+on a scalp screen, v17.2 version on the filename. The pattern: **a fact copied
+into a second place with no test tying the two together.** Where it can be
+computed from one source, it should be.

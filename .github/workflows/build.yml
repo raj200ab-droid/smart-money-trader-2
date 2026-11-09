@@ -23,6 +23,12 @@ jobs:
           channel: 'stable'
           cache: true
 
+      - name: Stamp and mirror tests
+        run: |
+          python3 tool/mirror/test_stamps.py
+          python3 tool/mirror/test_mirror.py
+          python3 tool/mirror/test_universe.py
+
       - name: Create Android Project
         run: |
           cp lib/main.dart /tmp/my_main.dart
