@@ -1000,3 +1000,43 @@ This is the same shape as the v7 fixed-TP lesson: a feature that looks like more
 opportunity is a worse trade once costs are counted.
 
 Released as tag `v17.0.0` (commit `be559bd`, CI run `42686518272` success, release run `42687019960` success). Asset `smart-money-trader-v17-scalp-17.0.0-20.apk`, 20.6 MB. Release notes carry the negative measurement table so the warning travels with the download.
+
+## 24. v17.1 — two swing labels were still hard-coded
+
+Device screenshot (INIT, scalp mode, 75% STRICT) exposed it. The confirmations
+were correct — `30M bullish bias`, `15M bullish FVG`, `5M bullish BOS`,
+`15M breakout`, `5M bullish break 21 bar age` — but two other places on the
+same screen still printed the swing timeframe names:
+
+| spot | was | now |
+|---|---|---|
+| summary bar timeframe badges | `4H` `1H` `15M` (`const`) | `_mode.biasTf/zoneTf/triggerTf` |
+| detail sheet structure rows | `4H structure` / `1H structure` / `15M structure` | `s.mode.*` |
+
+The engine was never wrong: `multiTF` was already fed the 30M/15M/5M series and
+`TradeSignal.mode` was already carried on the signal. Only the labels lied, so a
+scalp signal read like a swing signal on the same screen. Same class of bug as
+the v16 `999 bar age` sentinel — the label a user reads must come from the same
+object that produced the decision.
+
+Also fixed: `tool/mirror/mirror.py` still used `breakAge = 999` for "no break"
+(Dart was changed to `-1` in v16). Nothing scored on it, so no measured number
+changes, but the two sides must agree.
+
+Verification: tree-sitter parse 0 errors, `test_mirror.py` PASS,
+`test_universe.py` PASS.
+
+### What "21 bar age" actually means
+
+`breakAge = c.length - 1 - lastBreak.bar` — closed bars of the **trigger**
+timeframe since the break, counting the most recent closed bar as 0. On a 5M
+trigger, `21 bar age` = 21 × 5 = **105 minutes ≈ 1h 45m** since the 5M close
+that broke the pivot.
+
+The break still counts as a trigger because
+`triggerBull = breakEvent == 'BULLISH' && px > breakLevel`: the test is price
+*holding* beyond the broken pivot, not recency. `freshBreak` (≤2 bars) is
+computed but never read, so age is display-only. The only real freshness gate is
+on the relaxed WATCH pass (`internalFresh`, ≤4 bars of the len-5 internal
+series). That is deliberate — it is the LUX behaviour where a BOS line stays
+valid for a run of bars, not one candle.

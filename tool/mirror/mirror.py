@@ -329,7 +329,7 @@ def analyze(c, tf='15M'):
         'breakEvent': last_break['event'] if last_break else '',
         'breakPattern': last_break['pattern'] if last_break else '',
         'breakLevel': last_break['pivot']['price'] if last_break else c[-1]['close'],
-        'breakAge': 999 if last_break is None else len(c) - 1 - last_break['bar'],
+        'breakAge': -1 if last_break is None else len(c) - 1 - last_break['bar'],
         'internalFresh': internal_fresh,
         'internalEvent': internal_last['event'] if internal_last else '',
     }

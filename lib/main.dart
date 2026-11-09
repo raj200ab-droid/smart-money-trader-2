@@ -21,7 +21,7 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v17 · scalp';
+const String kBuild = 'v17.1 · scalp labels';
 
 /// App version reported to Android, so the installed build is identifiable
 /// from Settings without opening the app.
@@ -3025,7 +3025,7 @@ class _HS extends State<HomeScreen> {
               if (mounted) setState(() => _tooYoung++);
             } else {
               if (c4.length < 120 && mounted) setState(() => _short4h++);
-              final bias = Engine.analyze('4H', w4);
+              final bias = Engine.analyze(biasTf.toUpperCase(), w4);
 
               // Strict SMC confluence first; fall back to the relaxed pass so
               // the list is not empty in quiet markets (flagged WATCH).
@@ -3366,12 +3366,12 @@ class _HS extends State<HomeScreen> {
             ],
           ),
           Row(
-            children: const <Widget>[
-              _TfBadge('4H', K.blue),
-              SizedBox(width: 4),
-              _TfBadge('1H', Color(0xFFA371F7)),
-              SizedBox(width: 4),
-              _TfBadge('15M', K.orange),
+            children: <Widget>[
+              _TfBadge(_mode.biasTf, K.blue),
+              const SizedBox(width: 4),
+              _TfBadge(_mode.zoneTf, const Color(0xFFA371F7)),
+              const SizedBox(width: 4),
+              _TfBadge(_mode.triggerTf, K.orange),
             ],
           ),
         ],
@@ -3660,9 +3660,9 @@ class _HS extends State<HomeScreen> {
                     '${s.eqh ? 'EQH ' : ''}${s.eql ? 'EQL' : ''}'.trim().isEmpty
                         ? 'None'
                         : '${s.eqh ? 'EQH ' : ''}${s.eql ? 'EQL' : ''}'.trim()),
-                _detailRow('4H structure', s.tf4h),
-                _detailRow('1H structure', s.tf1h),
-                _detailRow('15M structure', s.tf15m),
+                _detailRow('${s.mode.biasTf} structure', s.tf4h),
+                _detailRow('${s.mode.zoneTf} structure', s.tf1h),
+                _detailRow('${s.mode.triggerTf} structure', s.tf15m),
                 _detailRow('Generated', timeAgo(s.time)),
                 const SizedBox(height: 20),
                 Container(
