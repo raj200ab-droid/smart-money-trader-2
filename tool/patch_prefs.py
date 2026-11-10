@@ -196,7 +196,10 @@ def main() -> int:
     act = find_main_activity(root)
     if act is None:
         print("error: no MainActivity found anywhere in the tree", file=sys.stderr)
+        print("::error title=prefs::no MainActivity found anywhere in the tree")
         print(describe_tree(root), file=sys.stderr)
+        print("::error title=prefs::tree::" +
+              describe_tree(root).replace('\n', ' | '))
         return 1
     # Package directory is whatever follows the last source root.
     parent = act.parent.as_posix()
@@ -240,6 +243,11 @@ def _run_with_traceback() -> int:
     except BaseException:
         tb = traceback.format_exc()
         print(tb, file=sys.stderr)
+        # Also publish as workflow annotations: this repo's Actions logs live on
+        # a host the development sandbox cannot read, so stderr is not enough.
+        for line in tb.strip().splitlines():
+            safe = line.replace('%', '%25').replace('\r', '').replace('\n', '%0A')
+            print(f"::error title=prefs::{safe}")
         try:
             with open("prefs_debug.txt", "w", encoding="utf-8") as f:
                 f.write(tb)
