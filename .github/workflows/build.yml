@@ -79,13 +79,28 @@ jobs:
           echo "exit=$?" 
           exit 0
 
-      - name: Upload analyze log
+      # The runner cannot upload where this environment can read, so the log is
+      # published as a workflow ANNOTATION, which comes back through the API.
+      - name: Publish analyze log as annotations
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: analyze-log
-          path: analyze.log
-          if-no-files-found: ignore
+        run: |
+          python3 - <<'PY'
+          import json, os
+          p = 'analyze.log'
+          if not os.path.exists(p):
+              print('::error title=analyze::no analyze.log')
+              raise SystemExit(0)
+          lines = [l.rstrip() for l in open(p, encoding='utf-8', errors='replace') if l.strip()]
+          errs = [l for l in lines if ' error • ' in l]
+          print(f'::error title=analyze-summary::{len(errs)} errors, {len(lines)} lines total')
+          for l in errs[:15]:
+              msg = l.replace('%', '%25').replace('\r', '').replace('\n', '%0A')
+              print(f'::error title=analyze::{msg}')
+          for l in lines[:40]:
+              print(l)
+          if not errs:
+              print('::warning title=analyze::no lines matched " error • "')
+          PY
 
       - name: Fail if analyze failed
         if: steps.analyze.outcome == 'failure'
