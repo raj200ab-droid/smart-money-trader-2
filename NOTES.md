@@ -1371,3 +1371,13 @@ why the stop is swept rather than fixed.
 
 Verification: tree-sitter 0 errors, `test_stamps` PASS, `test_mirror` PASS
 (4 assertions incl. the new MACD pin), `test_universe` PASS.
+
+Released as tag `v18.0.0` (commit `d779bc0`, CI `42842924096` success, release
+run `42843378190` success). Asset
+`smart-money-trader-v18.0-3M-modes-18.0.0-25.apk`, 20.7 MB, link returns 302.
+
+The first CI run on this release failed in `flutter analyze`: the new
+`TradeMode` getters used Dart 3 `switch` expressions. The SDK constraint is
+`>=2.18.0`, so they were rewritten as plain conditionals, and two unused fields
+were dropped. Nothing in the tree-sitter check caught this — a parser is not a
+type checker, and CI is the only analyzer this project has.
