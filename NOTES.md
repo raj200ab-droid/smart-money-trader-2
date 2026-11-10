@@ -1757,3 +1757,29 @@ channel are compile-verified and test-verified but **not run-verified**. `Gemini
 returns false when the channel is missing, and the sheet then shows a warning instead of
 pretending the key was saved — the honest failure, but it means the first real-world check
 is the user's.
+
+### §33 · Shipped
+
+| | |
+|---|---|
+| commit | `53ed5af` (tag `v18.4.0`) |
+| CI | `42918656029` — green, prefs patch step passed for the first time |
+| release | `42919078302` |
+| asset | `smart-money-trader-v18.4-Gemini-advisor-18.4.0-29.apk`, 21 008 645 B |
+| page | https://github.com/raj200ab-droid/smart-money-trader-2/releases/tag/v18.4.0 |
+| QR | `/home/user/v18.4-apk-qr.png` (decoded back to the exact URL) |
+
+**The debugging lesson worth keeping.** Three CI runs burned on one step because
+this environment cannot read Actions logs (the runner serves them from
+`productionresultssa*.blob.core.windows.net`, and artifact ZIPs from the same
+host). The fix was not cleverness, it was making CI report through a channel
+that *is* reachable: `::error title=...::message` becomes a check-run
+annotation, and annotations come back through `api.github.com`. Every failure
+path in `patch_prefs.py` now emits one, and `flutter analyze` output is
+published the same way. **When a build fails where you cannot see it, change
+how it reports before changing what it does.**
+
+Two of the three bugs were only found by reproducing the *generated* file
+locally — the template has changed shape since the notes in `tool/` were
+written. A patch step against generated code needs a fixture of that generated
+code, which is why `test_gemini.py` group 8 renders both templates.
