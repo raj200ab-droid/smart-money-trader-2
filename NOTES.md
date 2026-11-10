@@ -1676,3 +1676,24 @@ They stand. §31's `pullback` variant already included the candle turn; the
 is the claim on frequency: expect **~0.4 signals per 400-coin scan**, i.e. a
 mostly empty screen is normal, and the quiet list plus the stage counter is the
 product in the meantime.
+
+### Shipped
+
+Released as **v18.3.0** on 2026-11-08.
+
+| item | value |
+|---|---|
+| commit | `615a5f3` |
+| build CI | `42914732554` success |
+| release run | `42915128837` success |
+| asset | `smart-money-trader-v18.3-3M-scalp-says-why-18.3.0-28.apk`, 20 698 083 B |
+| download link | 302 |
+
+The branch pointer reverted to the pre-v18.2 base again mid-session (a repeat of
+the §30 incident), which is why the first push of the v18.3 commit was rejected
+as non-fast-forward even though the content was correct. Repairing it by
+cherry-picking onto `85a9015` left conflict markers inside
+`tool/mirror/test_3m_scalp.py`; those were caught by grepping the tree for
+markers before pushing, not by the test run (the markers sat in code paths the
+test did not execute). The marker check is now part of the routine before a
+commit, and the file was restored from the known-good commit.
