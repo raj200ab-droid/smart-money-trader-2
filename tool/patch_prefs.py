@@ -179,8 +179,8 @@ def patch_main_activity(path: pathlib.Path) -> bool:
     # A missing brace in generated Kotlin is a build failure 2 minutes later
     # with an unhelpful message, so fail here with a useful one.
     if text.count("{") != text.count("}"):
-        print(f"error: unbalanced braces after patch ({text.count('{')} open, "
-              f"{text.count('}')} close)", file=sys.stderr)
+        print(f"::error title=prefs::unbalanced braces ({text.count('{')} open, "
+              f"{text.count('}')} close)")
         print(text, file=sys.stderr)
         return False
     path.write_text(text, encoding="utf-8")
@@ -188,19 +188,29 @@ def patch_main_activity(path: pathlib.Path) -> bool:
     return True
 
 
+def fail(msg: str) -> int:
+    """Report a failure twice: stderr for humans, annotation for the API.
+
+    This repository's Actions logs are served from a host that the development
+    sandbox cannot reach, so `print(..., file=sys.stderr)` is invisible where
+    the fix has to be written. Annotations come back through the API.
+    """
+    print(f"::error title=prefs::{msg}")
+    print(f"error: {msg}", file=sys.stderr)
+    return 1
+
+
 def main() -> int:
     root = pathlib.Path(".")
+    print(f"cwd: {pathlib.Path('.').resolve()}")
+    print(f"files here: {sorted(p.name for p in pathlib.Path('.').iterdir())[:20]}")
     if not pathlib.Path("android").is_dir():
-        print("error: android/ not found -- run after flutter create", file=sys.stderr)
-        return 1
+        return fail("android/ not found -- run after flutter create")
     act = find_main_activity(root)
     if act is None:
-        print("error: no MainActivity found anywhere in the tree", file=sys.stderr)
-        print("::error title=prefs::no MainActivity found anywhere in the tree")
         print(describe_tree(root), file=sys.stderr)
-        print("::error title=prefs::tree::" +
-              describe_tree(root).replace('\n', ' | '))
-        return 1
+        return fail("no MainActivity in tree: " +
+                    describe_tree(root).replace("\n", " | "))
     # Package directory is whatever follows the last source root.
     parent = act.parent.as_posix()
     for marker in ("/kotlin/", "/java/"):
@@ -214,15 +224,13 @@ def main() -> int:
     print("wrote", prefs)
 
     if not patch_main_activity(act):
-        return 1
+        return fail(f"could not patch {act}")
 
     # verify
     if CHANNEL not in act.read_text(encoding="utf-8"):
-        print("error: channel not present after patch", file=sys.stderr)
-        return 1
+        return fail("channel not present after patch")
     if not prefs.is_file():
-        print("error: GeminiPrefs.kt missing", file=sys.stderr)
-        return 1
+        return fail("GeminiPrefs.kt missing")
     print("verify: channel + handler in place")
     return 0
 
