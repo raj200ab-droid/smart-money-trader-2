@@ -28,6 +28,7 @@ jobs:
           python3 tool/mirror/test_stamps.py
           python3 tool/mirror/test_mirror.py
           python3 tool/mirror/test_universe.py
+          python3 tool/mirror/test_3m_order.py
 
       - name: Create Android Project
         run: |

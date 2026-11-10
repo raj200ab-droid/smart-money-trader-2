@@ -1381,3 +1381,42 @@ The first CI run on this release failed in `flutter analyze`: the new
 `>=2.18.0`, so they were rewritten as plain conditionals, and two unused fields
 were dropped. Nothing in the tree-sitter check caught this — a parser is not a
 type checker, and CI is the only analyzer this project has.
+
+## 30. v18.1 — the 3M list ordered by movement, and the quiet coins no longer vanish
+
+The ask: on the 3-minute stack, rank by how much a coin actually moves, and
+still show the ones that do not move — below the rest.
+
+### Movement is measured, not inferred
+
+`TradeSignal.chop` = ATR(14) on the trigger series / price × 100, computed from
+the same candles the decision used. It is carried on the signal so the ordering
+and the card cannot disagree.
+
+Within a tier, `single3m` sorts by `chop` descending and then by confidence;
+every other mode keeps confidence as the tiebreak, so swing and scalp ordering
+is untouched. `test_3m_order.py` models the comparator literally from the Dart
+source (it caught two sign errors in my own model, which is the point of it).
+
+### The universe for a 3M scan is chosen differently
+
+`marketScan(byVolatility: true)` ranks by the **24h high-low range** instead of
+by 24h percent change. A coin that closed flat after swinging 8% inside the day
+is workable on a 3-minute hold; a coin that drifted up 6% in one smooth line is
+not, and the old "top gainers" picker would have chosen the second. Selection
+only — every engine rule still applies, and the 0.5% stop floor still refuses
+anything the move cannot pay for.
+
+### Coins with no setup are listed, not dropped
+
+`_Quiet` collects symbol, movement and bias for coins that produced no signal,
+in `single3m` only, and renders them under a divider at the bottom (capped at
+40 — a 400-coin scan can leave 350 coins empty, and printing all of them buries
+the list). This also removes an ambiguity that existed since v14: "no setup" and
+"never scanned" used to look identically absent.
+
+### What this does not fix
+
+Ordering does not create an edge. §29 measured single-3M at +105.2R gross and
+−259.9R net; sorting by movement puts the tradeable coins first, it does not make
+them profitable.

@@ -21,7 +21,7 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v18.0 · 3M modes';
+const String kBuild = 'v18.1 · 3M by movement';
 
 /// App version reported in the UI so an installed build is identifiable.
 ///
@@ -30,7 +30,7 @@ const String kBuild = 'v18.0 · 3M modes';
 /// an APK named `...-17.0.0-20.apk` while the code was `17.1.0+21`. The release
 /// workflow now reads pubspec.yaml directly and `test_stamps` fails the build
 /// if this line drifts again.
-const String kVersionName = '18.0.0+25';
+const String kVersionName = '18.1.0+26';
 
 
 /// How the three timeframes are stacked.
@@ -372,6 +372,7 @@ class TradeSignal {
     required this.tier,
     this.thinVolume = false,
     this.mode = TradeMode.swing,
+    this.chop = 0,
   });
 
   final String symbol;
@@ -408,6 +409,19 @@ class TradeSignal {
   /// Which horizon stack produced this signal, so the card labels the rows with
   /// the timeframes actually used (4H/1H/15M or 30M/15M/5M).
   final TradeMode mode;
+
+  /// How much this coin actually moves per bar on the trigger timeframe,
+  /// as ATR(14) over the last 14 bars expressed in percent of price.
+  ///
+  /// This is the only honest answer to "which coins are moving": a 3M signal on
+  /// a coin that moves 0.15% a bar is not the same trade as one that moves
+  /// 0.9% a bar, even when both score 70. It is measured from the same candles
+  /// the decision used, so it cannot disagree with the signal.
+  final double chop;
+
+  /// True when this coin is in the bottom of the movement range -- shown, but
+  /// sorted to the bottom so the busy coins come first.
+  bool get isQuiet => chop < 0.30;
 
   /// 'STRICT' (full confluence), 'WATCH' (relaxed trigger/threshold) or
   /// 'RADAR' (bias and trigger present, zone or score still missing). RADAR is
@@ -447,6 +461,7 @@ class TradeSignal {
       tier: tier == 'RADAR' ? 'RADAR' : 'WATCH',
       thinVolume: true,
       mode: mode,
+      chop: chop,
     );
   }
 
@@ -837,6 +852,30 @@ class MarketData {
     return out;
   }
 
+  /// Coins with the widest 24h range, for the 3-minute stack.
+  ///
+  /// The 3M mode asks a different question from swing: not "what moved today",
+  /// but "what is moving enough that a 3-minute hold can pay a 0.25% round
+  /// trip". The 24h high-low range is the only movement figure the ticker
+  /// carries, and it is the right one here -- a coin that closed flat but
+  /// swung 8% inside the day is exactly the coin a 3M trader can work, while a
+  /// coin that drifted up 6% in one smooth line is not.
+  ///
+  /// Selection only. The engine still applies every rule unchanged, and any
+  /// coin that fails the 0.5% stop floor is refused there, not here.
+  static List<CoinData> _pickVolatile(
+      List<CoinData> all, int target) {
+    final scored = all
+        .map((c) => MapEntry(
+            c,
+            c.highPrice > 0 && c.lowPrice > 0
+                ? (c.highPrice - c.lowPrice) / c.highPrice * 100
+                : 0.0))
+        .toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    return scored.take(target).map((e) => e.key).toList();
+  }
+
   /// Top gainers + top losers so both BUY and SELL setups can appear.
   ///
   /// Binance is geo-blocked in many regions; if every mirror fails we walk
@@ -844,10 +883,12 @@ class MarketData {
   static Future<List<CoinData>> marketScan({
     int gainers = scanTarget ~/ 2,
     int losers = scanTarget ~/ 2,
+    bool byVolatility = false,
   }) async {
     var errors = <String>[];
 
-    final attempt = await _scanOnce(gainers, losers, errors);
+    final attempt = await _scanOnce(gainers, losers, errors,
+        byVolatility: byVolatility);
     if (attempt.isNotEmpty) return attempt;
 
     // Every feed is still cooling down after a failed scan (the skip window).
@@ -855,7 +896,8 @@ class MarketData {
     if (_feeds.every(_isDown)) {
       await Future<void>.delayed(const Duration(seconds: 20));
       errors = <String>[];
-      final retry = await _scanOnce(gainers, losers, errors);
+      final retry = await _scanOnce(gainers, losers, errors,
+          byVolatility: byVolatility);
       if (retry.isNotEmpty) return retry;
     }
 
@@ -866,8 +908,9 @@ class MarketData {
   static Future<List<CoinData>> _scanOnce(
     int gainers,
     int losers,
-    List<String> errors,
-  ) async {
+    List<String> errors, {
+    bool byVolatility = false,
+  }) async {
     for (final feed in _feeds) {
       if (_isDown(feed)) {
         errors.add('${feed.name}: skipped (recently failed)');
@@ -887,7 +930,11 @@ class MarketData {
         lastStrongPool =
             all.where((c) => c.quoteVolume > _preferredVolume).length;
         final universe = selectUniverse(all, wanted);
-        final picked = _pick(universe, gainers, losers);
+        // A 3M scan is a movement question, not a movers question: rank by the
+        // 24h range so the coins with something to trade are the ones fetched.
+        final picked = byVolatility
+            ? _pickVolatile(universe, wanted)
+            : _pick(universe, gainers, losers);
         lastTradable = universe.length;
         lastPicked = picked.length;
         lastFunnelFeed = feed.name;
@@ -2350,6 +2397,11 @@ class Engine {
     final px = c15.last.close;
     if (px <= 0) return null;
 
+    // Movement per bar on the trigger timeframe, in percent of price. Measured
+    // from the same candles the decision used, so the sort order and the signal
+    // can never disagree about what "moving" means.
+    final chop = atr(c15, period: 14) / px * 100;
+
     // Bias comes from the 4H structure alone. The old fallbacks (a 4H internal
     // break, or 4H "neutral" borrowing the 1H trend) injected bias that the
     // higher timeframe did not actually have.
@@ -2587,6 +2639,7 @@ class Engine {
                 ? buy.clamp(0.0, 59.0)
                 : buy.clamp(0.0, 100.0))
             .toDouble(),
+        chop: chop,
         confirmations: bC,
         time: DateTime.now(),
         tf4h: t4.structure,
@@ -2655,6 +2708,7 @@ class Engine {
                 ? sell.clamp(0.0, 59.0)
                 : sell.clamp(0.0, 100.0))
             .toDouble(),
+        chop: chop,
         confirmations: sC,
         time: DateTime.now(),
         tf4h: t4.structure,
@@ -2760,6 +2814,7 @@ class Engine {
       sl: sl,
       tp: tp,
       confidence: 0,
+      chop: atr(c15, period: 14) / px * 100,
       confirmations: why,
       time: DateTime.now(),
       tf4h: t4.structure,
@@ -3081,14 +3136,30 @@ class HomeScreen extends StatefulWidget {
 
 /// One coin's engine result, kept until its chunk is committed.
 class _CoinOut {
-  _CoinOut(this.sig, this.nearMiss);
+  _CoinOut(this.sig, this.nearMiss, [this.quiet]);
 
   final TradeSignal? sig;
   final String? nearMiss;
+
+  /// Set only when the coin produced NO signal: symbol + movement per bar.
+  /// The 3M mode shows these at the bottom of the list rather than dropping
+  /// them, so "no setup" and "not looked at" cannot be confused.
+  final _Quiet? quiet;
+}
+
+class _Quiet {
+  _Quiet(this.symbol, this.chop, this.trend);
+  final String symbol;
+  final double chop;
+  final String trend;
 }
 
 class _HS extends State<HomeScreen> {
   final List<TradeSignal> _signals = <TradeSignal>[];
+
+  /// Coins that produced no setup. Only filled in the 3M mode, shown under the
+  /// signals so a quiet market is visible rather than absent.
+  final List<_Quiet> _quiets = <_Quiet>[];
 
   /// Per-coin engine output for the current scan, committed in chunks.
   /// Indexes line up with the coin list so a chunk commit is a plain copy.
@@ -3161,6 +3232,7 @@ class _HS extends State<HomeScreen> {
       setState(() {
         _loading = true;
         _signals.clear();
+        _quiets.clear();
         _msg = 'Top movers khujchi...';
         _feed = '';
         _done = 0;
@@ -3180,6 +3252,9 @@ class _HS extends State<HomeScreen> {
       final coins = await MarketData.marketScan(
         gainers: MarketData.scanTarget ~/ 2,
         losers: MarketData.scanTarget ~/ 2,
+        // 3M ranks the universe by how much each coin actually moves, so the
+        // 400 slots go to markets a 3-minute hold can work.
+        byVolatility: _mode == TradeMode.single3m,
       );
       if (id != _scanId || !mounted) return;
 
@@ -3231,6 +3306,7 @@ class _HS extends State<HomeScreen> {
           if (got == null) continue;
           if (got.sig != null) _signals.add(got.sig!);
           if (got.nearMiss != null) _nearMiss.add(got.nearMiss!);
+          if (got.quiet != null) _quiets.add(got.quiet!);
         }
         commitFrom = upto;
         if (!finalChunk) return;
@@ -3238,8 +3314,20 @@ class _HS extends State<HomeScreen> {
             t.tier == 'STRICT' ? 2 : (t.tier == 'WATCH' ? 1 : 0);
         _signals.sort((a, b) {
           final r = rank(b).compareTo(rank(a));
-          return r != 0 ? r : b.confidence.compareTo(a.confidence);
+          if (r != 0) return r;
+          // Within a tier, the busiest coin first. On the 3M stack the whole
+          // point of the mode is movement, so a 70% signal on a coin that moves
+          // 0.9% a bar outranks a 70% on one that moves 0.15% -- the second is
+          // not tradeable at the same size and its target is inside the fee.
+          // Other modes keep confidence as the tiebreak so their ordering does
+          // not change.
+          if (a.mode == TradeMode.single3m) {
+            final c = b.chop.compareTo(a.chop);
+            if (c != 0) return c;
+          }
+          return b.confidence.compareTo(a.confidence);
         });
+        _quiets.sort((a, b) => b.chop.compareTo(a.chop));
         _loading = false;
       }
 
@@ -3356,8 +3444,26 @@ class _HS extends State<HomeScreen> {
                     c4Long: c4, c1Long: c1,
                     relaxed: true, trace: why, mode: _mode);
               }
+              // On the 3M stack a coin with no setup is still listed, at the
+              // bottom, with its movement and bias. The instruction was to show
+              // the quiet coins rather than hide them, and it also stops "no
+              // setup" from being indistinguishable from "never scanned".
+              _Quiet? quiet;
+              if (sig == null && _mode == TradeMode.single3m && w15.length > 20) {
+                final pxNow = w15.last.close;
+                final a = Engine.atr(w15, period: 14);
+                quiet = _Quiet(
+                  sym,
+                  pxNow > 0 ? a / pxNow * 100 : 0,
+                  bias.trend > 0
+                      ? 'bull'
+                      : bias.trend < 0
+                          ? 'bear'
+                          : 'flat',
+                );
+              }
               _scratch[i] = _CoinOut(sig, why.isEmpty ? null : '$sym: '
-                  '${why.join(' • ')}');
+                  '${why.join(' • ')}', quiet);
             }
           } catch (_) {
             if (mounted) setState(() => _failed++);
@@ -3712,6 +3818,68 @@ class _HS extends State<HomeScreen> {
     );
   }
 
+  /// At most 40 quiet rows. A 400-coin scan can leave 350 coins with no setup;
+  /// printing all of them buries the list under a wall of nothing.
+  List<_Quiet> get _quietShown =>
+      _quiets.length <= 40 ? _quiets : _quiets.sublist(0, 40);
+
+  Widget _quietHeader() => Padding(
+        padding: const EdgeInsets.only(top: 14, bottom: 8, left: 2),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            const Divider(color: K.line, height: 1),
+            const SizedBox(height: 10),
+            Text(
+              '${_quiets.length} coin-e setup nei '
+              '(beshi move kora age)',
+              style: const TextStyle(
+                  color: K.text, fontSize: 12, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 3),
+            Text(
+              'Egulo analyse kora hoise but kono setup pay nai. '
+              'Kom move korche, tai niche.',
+              style: const TextStyle(color: K.muted, fontSize: 10, height: 1.4),
+            ),
+          ],
+        ),
+      );
+
+  Widget _quietRow(_Quiet q) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 2),
+        child: Row(
+          children: <Widget>[
+            SizedBox(
+              width: 68,
+              child: Text(
+                q.symbol.replaceAll('USDT', ''),
+                style: const TextStyle(
+                    color: K.text,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold),
+              ),
+            ),
+            Expanded(
+              child: Text(
+                q.trend,
+                style: TextStyle(
+                    color: q.trend == 'bull'
+                        ? K.green
+                        : q.trend == 'bear'
+                            ? K.red
+                            : K.muted,
+                    fontSize: 11),
+              ),
+            ),
+            Text(
+              '${q.chop.toStringAsFixed(2)}%/bar',
+              style: const TextStyle(color: K.muted, fontSize: 11),
+            ),
+          ],
+        ),
+      );
+
   Widget _list() {
     final items = _visible;
 
@@ -3721,7 +3889,9 @@ class _HS extends State<HomeScreen> {
       );
     }
 
-    if (items.isEmpty) {
+    // No signal, but quiet coins were collected: still show them rather than
+    // the empty-state, so the 3M mode reports what it saw.
+    if (items.isEmpty && _quiets.isEmpty) {
       return RefreshIndicator(
         onRefresh: run,
         color: K.green,
@@ -3815,11 +3985,22 @@ class _HS extends State<HomeScreen> {
       child: ListView.builder(
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(12, 10, 12, 20),
-        itemCount: items.length,
-        itemBuilder: (context, i) => _SignalCard(
-          signal: items[i],
-          onTap: () => _showDetails(items[i]),
-        ),
+        // Quiet coins are appended, never mixed in: signals first (busiest
+        // coin at the top), then a divider, then the coins that were analysed
+        // and produced nothing. Separating them keeps "a signal is below a
+        // non-signal" from ever happening.
+        itemCount: items.length +
+            (_quiets.isEmpty ? 0 : 1 + _quietShown.length),
+        itemBuilder: (context, i) {
+          if (i < items.length) {
+            return _SignalCard(
+              signal: items[i],
+              onTap: () => _showDetails(items[i]),
+            );
+          }
+          if (i == items.length) return _quietHeader();
+          return _quietRow(_quietShown[i - items.length - 1]);
+        },
       ),
     );
   }
@@ -4132,7 +4313,13 @@ class _SignalCard extends StatelessWidget {
                           Flexible(
                             child: Text(
                               '${signal.direction} • ${signal.pattern} • '
-                              '${signal.zone} • ${timeAgo(signal.time)}',
+                              '${signal.zone} • ${timeAgo(signal.time)}'
+                              // On the 3M stack the moving-per-bar figure is
+                              // shown, because it is what the list is sorted
+                              // by. A coin at 0.1%/bar cannot pay a 0.25% fee
+                              // on a 3M hold, and the card should say so rather
+                              // than leave the ordering unexplained.
+                              '${signal.mode == TradeMode.single3m ? ' • ${signal.chop.toStringAsFixed(2)}%/bar' : ''}',
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(color: color, fontSize: 10),
                             ),
