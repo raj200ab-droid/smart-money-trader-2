@@ -18,6 +18,22 @@ SKIP = {
     'XUSDUSDT',
 }
 LEVERAGED = ('UPUSDT', 'DOWNUSDT', 'BULLUSDT', 'BEARUSDT', '3LUSDT', '3SUSDT')
+# Mirror of MarketData._liveSymbols. Empty here means "unknown" -- but the
+# tests below pass the snapshot's own symbols so the wrapper rule can be
+# exercised the way it runs on a device.
+LIVE = set()
+# Mirror of MarketData._tokenizedStocks. Binance bStocks are ordinary spot
+# USDT pairs -- exchangeInfo marks them TRADING, volume is real, the delisted
+# check passes -- so they can only be excluded by name.
+TOKENIZED = {
+    # June 2026 launch set
+    'NVDABUSDT', 'TSLABUSDT', 'CRCLBUSDT', 'MUBUSDT', 'SNDKBUSDT', 'SPCXBUSDT',
+    # 29 July 2026 batch
+    'AAPLBUSDT', 'AMATBUSDT', 'AMZNBUSDT', 'BEBUSDT', 'DELLBUSDT', 'FLNCBUSDT',
+    'GSBUSDT', 'PYPLBUSDT', 'SMHBUSDT', 'SOXSBUSDT',
+    # other bStocks seen in the wild
+    'MDBBUSDT', 'PENGBUSDT', 'UVXYBUSDT', 'BBBUSDT',
+}
 
 
 def is_listed(symbol, price):
@@ -28,9 +44,29 @@ def is_listed(symbol, price):
         return False
     if symbol in SKIP:
         return False
-    if any(symbol.endswith(s) for s in LEVERAGED):
+    if symbol in TOKENIZED:
+        return False
+    if is_leveraged(symbol):
         return False
     return price > 0
+
+
+def is_leveraged(symbol, live=None):
+    """Mirror of MarketData._isLeveraged.
+
+    A leveraged wrapper only counts when the base it wraps is itself listed:
+    BTCUP wraps BTC, JUP does not wrap J. The old bare-suffix rule dropped
+    Jupiter's real JUPUSDT pair from every scan.
+    """
+    pool = LIVE if live is None else live
+    for suffix in LEVERAGED:
+        if not symbol.endswith(suffix):
+            continue
+        if not pool:
+            return True
+        base = symbol[:-len(suffix)]
+        return f'{base}USDT' in pool
+    return False
 
 
 def select_universe(all_coins, target):
@@ -160,11 +196,43 @@ def check_target(target):
     ok &= check('small exchange reports the truth', len(small_picked) == 80,
                 f'{len(small_picked)} picked from 80 listed')
 
-    # leveraged tokens must never appear
-    lev = [coin('BTCUPUSDT'), coin('ETH3LUSDT'), coin('BTCUSDT')]
+    # leveraged tokens must never appear -- and the wrapper rule needs the live
+    # set, because BTCUP is only a wrapper if BTC is listed.
+    live = {'BTCUSDT', 'ETHUSDT', 'JUPUSDT'}
+    LIVE.clear()
+    LIVE.update(live)          # what exchangeInfo would have supplied
+    lev = [coin('BTCUPUSDT'), coin('ETH3LUSDT'), coin('BTCUSDT'), coin('JUPUSDT')]
     lev_picked = pick(select_universe(lev, target), target // 2, target // 2)
     ok &= check('leveraged tokens never selected',
-                [c['symbol'] for c in lev_picked] == ['BTCUSDT'])
+                sorted(c['symbol'] for c in lev_picked)
+                == ['BTCUSDT', 'JUPUSDT'],
+                str(sorted(c['symbol'] for c in lev_picked)))
+
+    # With no live set (exchangeInfo failed) the conservative rule must still
+    # exclude wrappers rather than let them into a scan.
+    ok &= check('no live set still excludes wrappers',
+                is_leveraged('BTCUPUSDT', set()) and
+                is_leveraged('ETH3LUSDT', set()),
+                'conservative rule intact')
+
+    # tokenized stocks must never appear. These are the ones that leaked on a
+    # device: AAPLB (Apple) came back as a 75% BUY at 352.75 -- a share price
+    # inside a crypto scanner, because the exclusion list only knew 5 tickers.
+    stocks = [coin(s, 300.0, 2e6, 1.5) for s in sorted(TOKENIZED)]
+    stocks_picked = pick(select_universe(stocks + [coin('BTCUSDT')], target),
+                         target // 2, target // 2)
+    leaked = [c['symbol'] for c in stocks_picked if c['symbol'] in TOKENIZED]
+    ok &= check('tokenized stocks never selected', not leaked,
+                f'leaked: {leaked}' if leaked else 'none leaked')
+
+    # ...and the exclusion list must not swallow real crypto tickers that
+    # merely end in B. This is why it is an explicit set and not a suffix rule.
+    LIVE.update({'ARBUSDT', 'BNBUSDT', 'WBUSDT', 'JUPUSDT'})
+    real_b = [coin('ARBUSDT'), coin('BNBUSDT'), coin('WBUSDT'), coin('JUPUSDT')]
+    real_picked = pick(select_universe(real_b, target), 2, 2)
+    ok &= check('real tickers ending in B are kept',
+                len(real_picked) == len(real_b),
+                f'{len(real_picked)}/{len(real_b)} kept')
 
     print()
     return ok

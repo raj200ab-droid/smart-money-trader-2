@@ -1124,3 +1124,79 @@ that is positive (+3.3R vs −7.3R), and in **range** it is much worse
 rule, and nothing here measures it.
 
 Not shipped to the app. `tk` measurement only.
+
+## 27. v17.3 — the scan was full of shares, and missing Jupiter
+
+A device screenshot (scalp, 400/400, 17 signal · 130 watch · 1 radar) showed
+everything mode-correct — `Scalp 30M/15M/5M`, `30M bullish bias`,
+`15M bullish FVG`, `5M bullish BOS`. The bugs were underneath.
+
+### Bug 1 — AAPLB: a tokenized Apple share, ranked as a coin (fixed)
+
+The top card was `AAPLB · 352.7500 · BUY 75% · WATCH` with a 5% stop and a
+1.58% target. 352.75 is a **share price**, and AAPLB is Binance's bStock for
+Apple. It cleared every filter: it is a genuine spot USDT pair, exchangeInfo
+marks it TRADING, volume is real (about $6M/day), and the delisted check passes.
+
+`_tokenizedStocks` existed for exactly this — it knew **5** tickers
+(NVDAB, MDBB, PENGB, UVXYB, BBB). Binance has listed **20**. Missing:
+AAPLB, AMATB, AMZNB, BEB, CRCLB, DELLB, FLNCB, GSB, MUB, PYPLB, SMHB, SNDKB,
+SOXSB, SPCXB, TSLAB.
+
+This is not cosmetic. A tokenized equity trades 24/7 while the underlying share
+is closed, so it gaps at the open; a structural 5% stop computed from crypto
+candle mechanics is not the same instrument as one on SOL. Worse, the whole
+`quoteVolume > 5M` tier ranking treats it as comparable liquidity.
+
+Fixed by extending the explicit list to all 20 known bStocks and adding a test
+that fails if a tokenized symbol can ever reach the universe. The test also
+asserts the list does not over-match: `ARB`, `BNB`, `WB`, `JUP` must survive.
+
+### Bug 2 — `JUPUSDT` was silently excluded from every scan (fixed)
+
+Writing that test found this: the leveraged-token rule was a bare suffix match,
+and **Jupiter's `JUPUSDT` ends in `UPUSDT`**, so a real, liquid pair was being
+dropped from every universe since v11.
+
+A leveraged token is a *wrapper*: `BTCUP` wraps `BTC`, `ETHBULL` wraps `ETH`.
+So the rule is now "ends with a wrapper suffix **and** the stripped base is
+itself a listed pair". `JUP` strips to `J`, and `JUSDT` is not listed, so it is
+kept. When the live symbol set is unavailable (exchangeInfo failed) the old
+conservative rule is kept, so a network failure cannot flood the list with
+wrappers.
+
+### Bug 3 — the 30M bias cache never hit (fixed)
+
+`candles()` only took the cache branch for `tf == '4h'`, and every horizon
+inside it was the constant `_ms4h`. In scalp mode the bias series is **30M**, so
+the branch was never entered: every scan refetched 400 coins × 400 30M bars, and
+the cache was dead in the slowest mode. The cache is now keyed by timeframe and
+uses that timeframe's own bar span (`_isCacheable` covers 4h and 30m), so the
+forming bar is still rebuilt from the fresh 5M tail and nothing served is stale.
+
+### Bug 4 — WATCH cards wearing 70–75% (fixed)
+
+Four visible cards read `WATCH` at 75%, 70%, 70%, 70% while the STRICT gate is
+**60**. Cause: `asThin()` (thin book → demote STRICT to WATCH) copied
+`confidence` unchanged. v16 clamped the *relaxed* path to 59 for exactly this
+reason; the thin path was missed. Same lie as the `999 bar age`: a number that
+claims more than the decision behind it. Confidence is now clamped to 59
+wherever a signal is demoted.
+
+### Also fixed — labels that lied in scalp mode
+
+The footer cache note said `4H cache` in every mode, the empty-state text said
+`4H trend nei` / `15M trigger`, and the trace said `gate: 15M trigger nai` /
+`bearish 1H OB`. All now read from `_mode`.
+
+### Not a bug — the funnel
+
+`3745 ticker (175 delisted) → 518 listed (67 strong) → 400 picked → 400 analysed`
+is consistent: 518 − 400 = 118 pairs simply did not make the 400 cap, and 333 of
+the 400 came from the quiet tier because only 67 cleared the 5M/day floor. The
+`(67 strong)` figure is the **raw** pool before shape filtering, so it counts
+rows that are not tradable pairs — that number is the next thing to fix, not the
+dropped 118.
+
+Verification: tree-sitter 0 errors, `test_stamps` PASS, `test_mirror` PASS,
+`test_universe` PASS (6 assertions incl. 2 new).

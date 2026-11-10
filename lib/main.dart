@@ -21,7 +21,7 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v17.2 · honest filename';
+const String kBuild = 'v17.3 · clean universe';
 
 /// App version reported in the UI so an installed build is identifiable.
 ///
@@ -30,7 +30,7 @@ const String kBuild = 'v17.2 · honest filename';
 /// an APK named `...-17.0.0-20.apk` while the code was `17.1.0+21`. The release
 /// workflow now reads pubspec.yaml directly and `test_stamps` fails the build
 /// if this line drifts again.
-const String kVersionName = '17.2.0+22';
+const String kVersionName = '17.3.0+23';
 
 
 /// How the three timeframes are stacked.
@@ -390,7 +390,12 @@ class TradeSignal {
       entry: entry,
       sl: sl,
       tp: tp,
-      confidence: confidence,
+      // A card the engine refused to call STRICT must not wear a number that
+      // clears the STRICT gate. Device (v17.2): AAPLB read "75% WATCH" -- 15
+      // points above the 60 gate -- because a STRICT 75 was demoted to WATCH
+      // for a thin book and the score came along unchanged. v16 clamped the
+      // relaxed path for exactly this reason; the thin path was missed.
+      confidence: confidence > 59 ? 59 : confidence,
       confirmations: confirmations,
       time: time,
       tf4h: tf4h,
@@ -632,13 +637,37 @@ class MarketData {
   /// PENGB, UVXYB, BBB). Matching a suffix alone would be unsafe, so this is an
   /// explicit list, extended as Binance lists more.
   static const Set<String> _tokenizedStocks = <String>{
-    'NVDABUSDT',
+    // Launch set, June 2026.
+    'NVDABUSDT', // NVIDIA
+    'TSLABUSDT', // Tesla
+    'CRCLBUSDT', // Circle
+    'MUBUSDT',   // Micron
+    'SNDKBUSDT', // SanDisk
+    'SPCXBUSDT', // SpaceX
+    // Batch 2, 29 July 2026 (10 new equity tokens).
+    'AAPLBUSDT', // Apple
+    'AMATBUSDT', // Applied Materials
+    'AMZNBUSDT', // Amazon
+    'BEBUSDT',   // Bloom Energy
+    'DELLBUSDT', // Dell
+    'FLNCBUSDT', // Fluence Energy
+    'GSBUSDT',   // Goldman Sachs
+    'PYPLBUSDT', // PayPal
+    'SMHBUSDT',  // VanEck Semiconductor ETF
+    'SOXSBUSDT', // Direxion Semiconductor Bear 3x ETF
+    // Earlier/other bStocks seen in the wild.
     'MDBBUSDT',
     'PENGBUSDT',
     'UVXYBUSDT',
     'BBBUSDT',
   };
 
+  /// Leveraged tokens end with UP/DOWN/BULL/BEAR/3L/3S *and* the base ticker
+  /// they wrap was already listed. A bare suffix rule cannot tell `BTCUP` from
+  /// `JUP`: Jupiter's USDT pair is `JUPUSDT`, which ends in `UPUSDT`, so the
+  /// filter was silently dropping a real crypto pair from every scan. The fix
+  /// is to strip the suffix and only treat it as leveraged when the remaining
+  /// base is a listed symbol -- `BTC` exists, `J` does not.
   static const List<String> _leveragedSuffixes = <String>[
     'UPUSDT',
     'DOWNUSDT',
@@ -647,6 +676,29 @@ class MarketData {
     '3LUSDT',
     '3SUSDT',
   ];
+
+  /// The symbols the exchange reports as TRADING, filled by
+  /// [_binanceLiveSymbols] and used to tell a leveraged token from a real
+  /// ticker that happens to end in the same letters.
+  static Set<String> _liveSymbols = <String>{};
+
+  /// True when [symbol] is a leveraged token wrapper rather than a real pair.
+  ///
+  /// A bare suffix test is wrong: `JUPUSDT` (Jupiter) ends in `UPUSDT` and was
+  /// silently dropped from every scan. A wrapper is only a wrapper when the
+  /// base it wraps is itself a listed pair -- `BTCUP` wraps `BTC`, `JUP` does
+  /// not wrap `J`. When the live set is unavailable the old conservative rule
+  /// is kept, so a failed exchangeInfo call cannot flood the list.
+  static bool _isLeveraged(String symbol) {
+    for (final suffix in _leveragedSuffixes) {
+      if (!symbol.endsWith(suffix)) continue;
+      if (_liveSymbols.isEmpty) return true;
+      // "JUPUSDT" - "UPUSDT" keeps "J";   "BTCUPUSDT" - "UPUSDT" keeps "BTC".
+      final base = symbol.substring(0, symbol.length - suffix.length);
+      return _liveSymbols.contains('${base}USDT');
+    }
+    return false;
+  }
 
   static String baseOf(String symbol) => symbol.replaceAll('USDT', '');
 
@@ -658,9 +710,7 @@ class MarketData {
     if (c.symbol == 'USDTUSDT') return false;
     if (_skip.contains(c.symbol)) return false;
     if (_tokenizedStocks.contains(c.symbol)) return false;
-    for (final suffix in _leveragedSuffixes) {
-      if (c.symbol.endsWith(suffix)) return false;
-    }
+    if (_isLeveraged(c.symbol)) return false;
     return c.lastPrice > 0;
   }
 
@@ -849,6 +899,29 @@ class MarketData {
 
   static const int _ms4h = 4 * 60 * 60 * 1000;
 
+  /// Bar span of a timeframe the cache is asked about.
+  ///
+  /// The cache was written when 4H was the only bias series, and every horizon
+  /// and boundary in it was a hard-coded `_ms4h`. In scalp mode the bias is
+  /// 30M, so `candles()` never took the cache branch at all and every scan
+  /// refetched 400 x 400 30M bars -- the cache was silently dead in the one
+  /// mode that needs it most (a scalp scan is the slowest one).
+  static int _msSpan(String tf) {
+    switch (tf) {
+      case '5m':
+        return 5 * 60 * 1000;
+      case '15m':
+        return 15 * 60 * 1000;
+      case '30m':
+        return 30 * 60 * 1000;
+      case '1h':
+        return 60 * 60 * 1000;
+      case '4h':
+      default:
+        return _ms4h;
+    }
+  }
+
   /// True while no 4H bar has closed since the cache was written.
   ///
   /// The cache holds closed bars only, so the bar that was forming at fetch
@@ -860,12 +933,21 @@ class MarketData {
   /// would poison the 4H entries (and be poisoned by them).
   static String _cacheKey(String sym, String tf) => '$tf|$sym';
 
+  /// A timeframe whose closed bars cannot change and whose forming bar can be
+  /// rebuilt from the trigger series. Both bias timeframes qualify; the trigger
+  /// and zone series are fetched fresh because their forming bar is the signal.
+  static bool _isCacheable(String tf) => tf == '4h' || tf == '30m';
+
   static bool _cache4hFresh(String key) {
     final closedBar = _cache4h[key];
     if (closedBar == null || closedBar.isEmpty) return false;
     if (_cache4hAt[key] == null) return false;
+    // The horizon is the cached series' own bar span, not 4H: a 30M bias cache
+    // is one bar short as soon as its forming 30M bar closes, which is 30
+    // minutes, not 4 hours.
+    final span = _msSpan(key.split('|').first);
     final horizon = DateTime.fromMillisecondsSinceEpoch(
-      closedBar.last.openTime + 2 * _ms4h,
+      closedBar.last.openTime + 2 * span,
     );
     return DateTime.now().isBefore(horizon.subtract(_cacheEarlyExpiry));
   }
@@ -886,12 +968,15 @@ class MarketData {
   /// Merge cached closed 4H bars with the bar that is still forming in [c15].
   /// Only the tail is rebuilt, and only from data newer than the last closed
   /// 4H bar; every closed bar is passed through untouched.
-  static List<Candle> _merge4h(List<Candle> closed, List<Candle> c15, int lim) {
+  static List<Candle> _merge4h(
+      List<Candle> closed, List<Candle> c15, int lim, int span) {
     final bars = <Candle>[];
     if (closed.isNotEmpty) {
       final lastClosedOpen = closed.last.openTime;
-      // The next 4H bar opens exactly one 4H span after the closed one.
-      final boundary = lastClosedOpen + _ms4h;
+      // The next bar opens exactly one span after the closed one. The trigger
+      // series divides the bias series evenly in both modes (16 x 15M in 4H,
+      // 6 x 5M in 30M), so bucketing by openTime is exact either way.
+      final boundary = lastClosedOpen + span;
       final keep = closed.length > lim - 1 ? lim - 1 : closed.length;
       bars.addAll(closed.sublist(closed.length - keep));
       final tailBars = c15.where((k) => k.openTime >= boundary).toList();
@@ -906,7 +991,7 @@ class MarketData {
         }
         bars.add(Candle(
           openTime: boundary,
-          closeTime: boundary + _ms4h - 1,
+          closeTime: boundary + span - 1,
           open: tailBars.first.open,
           high: hi,
           low: lo,
@@ -935,11 +1020,14 @@ class MarketData {
     if (!deep && _pairDown(sym)) throw MarketDataException('candles $sym');
     if (deep) return _fetchCandles(sym, tf, lim);
 
-    if (tf == '4h' && liveFrom != null) {
+    // Cache any bias series that is fetched with a fresh trigger series behind
+    // it. Only the bias call passes liveFrom, so this is exactly that call.
+    if (liveFrom != null && _isCacheable(tf)) {
       final key = _cacheKey(sym, tf);
+      final span = _msSpan(tf);
       final closed = _cache4h[key];
       if (closed != null && _cache4hFresh(key)) {
-        final merged = _merge4h(closed, liveFrom, lim);
+        final merged = _merge4h(closed, liveFrom, lim, span);
         // The cache holds only CLOSED bars, so it is by construction one bar
         // short of what the exchange returns. Demanding >= lim here made every
         // single scan a miss (device: "4H cache 0/0+36"), which refetched
@@ -1127,6 +1215,7 @@ class MarketData {
         }
         if (live.isNotEmpty) {
           _binanceTrading = live;
+          _liveSymbols = live;
           return live;
         }
       } catch (e) {
@@ -2248,13 +2337,13 @@ class Engine {
           (bear4 && sell >= threshold);
       if (scorePass) {
         if (bull4 && !trigBuy) {
-          trace.add('gate: 15M trigger nai');
+          trace.add('gate: $gTf trigger nai');
         } else if (bear4 && !trigSell) {
-          trace.add('gate: 15M trigger nai');
+          trace.add('gate: $gTf trigger nai');
         } else if (bull4 && bullBlocked) {
-          trace.add('gate: upore bearish 1H OB block korche');
+          trace.add('gate: upore bearish $zTf OB block korche');
         } else if (bear4 && bearBlocked) {
-          trace.add('gate: niche bullish 1H OB block korche');
+          trace.add('gate: niche bullish $zTf OB block korche');
         } else if (buy <= sell) {
           trace.add('gate: dui dikei score soman/kom');
         }
@@ -3115,15 +3204,18 @@ class _HS extends State<HomeScreen> {
         // Proof on the device that the cache is warm, and which build is
         // running. A cold first scan shows 0 - that is expected.
         final cacheNote =
-            ' • 4H cache $hits/$hits+$misses (${MarketData.cached4h})';
+            ' • ${_mode.biasTf} cache $hits/$hits+$misses '
+            '(${MarketData.cached4h})';
         // An empty list must explain itself: "no 4H trend" and "trend but no
         // 15M trigger" are completely different problems.
         final why = _noBias >= _biasNoSetup
-            ? '$_noBias/$_total coin-e 4H trend nei'
-            : '$_biasNoSetup coin-e 4H trend ache, kintu 15M trigger/zone '
-                'mile nai';
+            ? '$_noBias/$_total coin-e ${_mode.biasTf} trend nei'
+            : '$_biasNoSetup coin-e ${_mode.biasTf} trend ache, kintu '
+                '${_mode.triggerTf} trigger/zone mile nai';
         final young =
-            _tooYoung > 0 ? ' • $_tooYoung notun coin (4H history kom)' : '';
+            _tooYoung > 0
+                ? ' • $_tooYoung notun coin (${_mode.biasTf} history kom)'
+                : '';
         // A small universe is worth shouting about: it means the exchange did
         // not hand over its full ticker list, not that the market is empty.
         final raw = MarketData.lastRawTickers;
@@ -3150,7 +3242,7 @@ class _HS extends State<HomeScreen> {
         final funnel = ' • $funnelFeed $raw ticker'
             '${dead > 0 ? ' ($dead delisted)' : ''} → $listedPool listed '
             '($strongPool strong) → $_total picked → $analysed analysed'
-            '${_short4h > 0 ? ' ($_short4h short 4H)' : ''}'
+            '${_short4h > 0 ? ' ($_short4h short ${_mode.biasTf})' : ''}'
             '${_delisted > 0 ? ' ($_delisted stale data)' : ''}';
         // Warn below half the target: at 400 that is 200. A universe this
         // small is a data story, not a market story.
@@ -3448,7 +3540,7 @@ class _HS extends State<HomeScreen> {
               child: Padding(
                 padding: EdgeInsets.symmetric(horizontal: 34),
                 child: Text(
-                  'Strict SMC setup (4H bias + 1H OB/FVG + 15M trigger) '
+                  'Strict SMC setup (bias + OB/FVG zone + trigger) '
                   'ekhon nei. Niche dekho kon coin koto duro eshechilo.',
                   textAlign: TextAlign.center,
                   style: TextStyle(color: K.muted, fontSize: 12, height: 1.4),
