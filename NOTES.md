@@ -1420,3 +1420,22 @@ the list). This also removes an ambiguity that existed since v14: "no setup" and
 Ordering does not create an edge. §29 measured single-3M at +105.2R gross and
 −259.9R net; sorting by movement puts the tradeable coins first, it does not make
 them profitable.
+
+### Shipped
+
+Released as **v18.1.0** on 2026-11-08.
+
+| item | value |
+|---|---|
+| commit | `008b2aa` |
+| build CI | `42848272780` success |
+| release run | `42848804449` success |
+| asset | `smart-money-trader-v18.1-3M-by-movement-18.1.0-26.apk`, 20 676 313 B |
+| download link | 302 to `objects.githubusercontent.com` |
+
+The first push of this commit was rejected non-fast-forward: the local branch
+pointer had fallen behind `origin` (it still pointed at `dcc3df4` while the remote
+carried that commit plus the earlier v18.1 commit). Fetching and replaying the
+work on top of `origin` (cherry-pick, resolving the four conflicted files to the
+worktree copy) produced `008b2aa`, which pushed cleanly. All four test scripts
+were re-run on the resolved tree before pushing.
