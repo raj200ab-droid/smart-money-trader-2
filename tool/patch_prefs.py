@@ -224,5 +224,31 @@ def main() -> int:
     return 0
 
 
+def _run_with_traceback() -> int:
+    """Run main() and leave a full traceback on disk.
+
+    GitHub Actions logs are not always retrievable for this repo, so the script
+    writes its own diagnosis next to the log: a step that fails in 0 seconds
+    without a readable error is worse than a slow one.
+    """
+    import traceback
+
+    try:
+        return main()
+    except SystemExit:
+        raise
+    except BaseException:
+        tb = traceback.format_exc()
+        print(tb, file=sys.stderr)
+        try:
+            with open("prefs_debug.txt", "w", encoding="utf-8") as f:
+                f.write(tb)
+                f.write("\n\n--- tree ---\n")
+                f.write(describe_tree(pathlib.Path(".")))
+        except OSError:
+            pass
+        return 1
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_run_with_traceback())

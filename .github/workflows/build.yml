@@ -55,7 +55,17 @@ jobs:
           ls -la android/app/src/main/ 2>/dev/null
 
       - name: Add device storage for the Gemini key
+        id: prefs
+        continue-on-error: true
         run: python3 tool/patch_prefs.py
+
+      - name: Upload prefs patch diagnosis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prefs-debug
+          path: prefs_debug.txt
+          if-no-files-found: ignore
 
       - name: Get Dependencies
         run: flutter pub get
