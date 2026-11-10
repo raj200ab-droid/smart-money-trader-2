@@ -1595,3 +1595,84 @@ Two things this release fixed about its own process:
    `mirror3m.py` used Wilder. The parity test was written exactly to catch this
    class of drift and did: the app now uses `atrWilder`, and `test_3m_parity.py`
    compares 36 360 real bars decision by decision.
+
+## 32. v18.3 — the 3M scalp screen was honest about being empty, and wrong about why
+
+Device screenshot, v18.2, 400 coins scanned:
+
+    Kono setup nei ekhon (Binance) — 0/400 coin-e 3M trend nei
+
+and directly underneath it a list of coins reading `BTTC bear 2.24%/bar`,
+`PARTI bull 1.44%/bar`. The message was false, and it was false in a way that
+made the mode look broken rather than selective.
+
+### Bug 1 — the message came from counters that never ran
+
+`scalp3m` has its own scan branch in `_HS.run`. The empty-state sentence,
+though, was built from `_noBias` / `_biasNoSetup`, which are only incremented in
+the SMC branch. In the 3M scalp branch they both stay 0, so `_noBias >= _biasNoSetup`
+was `0 >= 0` and printed "0/400 ... trend nei" unconditionally. The quiet list
+below it was computed from real EMAs, which is why the two disagreed on screen.
+
+Fix: `Engine.scalp3m` now takes an `onRefuse` callback and names the stage that
+stopped each coin — `gate`, `trend`, `side`, `rsi`, `bar`, `stop`, `data`. The
+empty state counts them and prints the biggest one with its own number:
+
+| stage | what it means for the user |
+|---|---|
+| gate | ATR% under 0.80 — the fee cannot be paid. Nothing to do. |
+| trend | EMA 9/21/50 not stacked. |
+| **side** | trend exists but price is not on the pullback side of EMA21 — a chase, not a dip. |
+| rsi | on the pullback side, RSI not cooling. |
+| bar | everything aligns except the candle has not turned. |
+| stop | stop under 0.35% — the fee would eat it. |
+
+### Bug 2 — the quiet row and the gate used different ATRs
+
+The row printed `Engine.atr()` (simple average of the last 14 true ranges) while
+the gate used `atrWilder`. So a coin could read `0.62%/bar` next to a list
+explained by an 0.80% gate, or read above 0.80 and still be refused. The row now
+prints the same Wilder number the gate used.
+
+### What I tried to fix instead, and why it was rejected
+
+The obvious reading of that screenshot is "0 signals means the filter is too
+tight". It is. But loosening it was measured, and it does not work:
+
+**Funnel, 390 948 real bars, gate 0.80, expected signals per 400-coin scan:**
+
+| conditions | per scan |
+|---|---|
+| trend only | 14.59 |
+| trend + candle direction | 7.07 |
+| trend + pullback side | 2.26 |
+| trend + side + RSI band | 2.26 (**RSI adds nothing**) |
+| trend + side + sideways-turned candle | 0.41 (shipped) |
+
+**Entry filters at a fixed gate, 12 pairs:** at gate 0.80 and again at 0.55,
+`pullback` is the *only* entry with a positive net. `trend_any` (−0.05/trade),
+`trend_green` (−0.15), `breakout` (−0.33) and `ema_reclaim` (−0.05) all lose.
+The rarity is the edge.
+
+**And the "turn" confirmation is load-bearing.** Same stops, same targets, same
+gate, 10 months, same 1070 trades — dropping only the candle-turn requirement:
+
+| entry | n | net | net/trade |
+|---|---|---|---|
+| pullback with the candle turn (shipped) | 440 | **+117.2%** | +0.266% |
+| pullback side only (turn removed) | 1070 | **−77.3%** | −0.072% |
+| side only, gate 0.50 | 4975 | −880.5% | −0.177% |
+
+So the frequency cannot be bought by relaxing the rule: every relaxation tested
+turns a positive entry into a negative one. The mode is genuinely selective, and
+what was broken was the *explanation*, not the selectivity. That is what v18.3
+fixes. Saying "it is supposed to be empty, and here is the exact reason" is a
+better product than a screen full of signals that lose money.
+
+### What this means for the numbers in §31
+
+They stand. §31's `pullback` variant already included the candle turn; the
+10-month re-run of the same rule gives +117.2% net over 440 trades. What changes
+is the claim on frequency: expect **~0.4 signals per 400-coin scan**, i.e. a
+mostly empty screen is normal, and the quiet list plus the stage counter is the
+product in the meantime.

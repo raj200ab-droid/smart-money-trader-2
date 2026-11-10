@@ -55,7 +55,7 @@ def main():
               m.group(1) if m else 'not found')
 
     # the gate is applied before any of the directional work
-    gate_line = src.find('if (atrPct < scalp3mGate) return null;')
+    gate_line = src.find('if (atrPct < scalp3mGate) {')
     entry_line = src.find('if (up && px < e21n && rn >= 30 && rn <= 55')
     check('gate is checked before the entry conditions',
           0 < gate_line < entry_line, f'{gate_line} vs {entry_line}')
@@ -73,7 +73,7 @@ def main():
         print('  PASS  wiring checks continue below')
         sections = src
         check('scalp3m is a TradeMode', 'scalp3m;' in sections)
-        check('scan calls Engine.scalp3m', 'Engine.scalp3m(sym, w15)' in src)
+        check('scan calls Engine.scalp3m', 'Engine.scalp3m(' in src and 'w15,' in src)
         print()
         if fails:
             print(f'{len(fails)} FAILED: {fails}')
@@ -138,7 +138,7 @@ def main():
     # ---------------------------------------------------------------- 4. wiring
     print('4. wiring in main.dart')
     check('scalp3m is a TradeMode', 'scalp3m;' in src)
-    check('scan calls Engine.scalp3m', 'Engine.scalp3m(sym, w15)' in src)
+    check('scan calls Engine.scalp3m', 'Engine.scalp3m(' in src and 'w15,' in src)
     # scalp3m must never fall through to the SMC scoring, the relaxed pass or
     # the radar candidate: those are a different engine with a different gate.
     check('scalp3m has its own scan branch',
@@ -150,6 +150,24 @@ def main():
           '_mode.isSingleTimeframe || _mode.isScalp3m' in src)
     check('scalp3m ranks the universe by movement',
           'byVolatility:' in src and '_mode == TradeMode.scalp3m' in src)
+
+    # ------------------------------------------------- 5. the empty-screen bug
+    print('5. the empty screen explains itself correctly')
+    check('scalp3m reports the refusing stage',
+          'void Function(String stage)? onRefuse' in src)
+    for stage in ('gate', 'trend', 'side', 'rsi', 'bar', 'stop', 'data'):
+        check(f'refusal stage \'{stage}\' exists', f"no('{stage}')" in src)
+    check('the scalp branch counts each refusal',
+          'onRefuse: (stage) => _scalp3mWhy[stage] =' in src)
+    # The v18.2 bug: the SMC counters were printed in a mode where they never
+    # ran, so the screen said "0/400 3M trend nei" above a list of bull coins.
+    check('scalp3m does not reuse the SMC empty-state wording',
+          '_mode.isScalp3m\n            ? _scalp3mWhyMessage()' in src)
+    check('the message names a stage, not a guess',
+          'switch (top.key)' in src)
+    # The quiet row must use the same ATR as the gate that refused the coin.
+    check('quiet rows use Wilder ATR like the gate',
+          'final a3 = Engine.atrWilder(w15, period: 14);' in src)
 
     print()
     if fails:

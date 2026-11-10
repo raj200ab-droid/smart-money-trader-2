@@ -21,7 +21,7 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v18.2 · 3M scalp (fee gate)';
+const String kBuild = 'v18.3 · 3M scalp says why';
 
 /// App version reported in the UI so an installed build is identifiable.
 ///
@@ -30,7 +30,7 @@ const String kBuild = 'v18.2 · 3M scalp (fee gate)';
 /// an APK named `...-17.0.0-20.apk` while the code was `17.1.0+21`. The release
 /// workflow now reads pubspec.yaml directly and `test_stamps` fails the build
 /// if this line drifts again.
-const String kVersionName = '18.2.0+27';
+const String kVersionName = '18.3.0+28';
 
 
 /// How the three timeframes are stacked.
@@ -2853,34 +2853,79 @@ class Engine {
   /// One series only, so every reading uses candles the live chart also had at
   /// that close. Entry is that close -- never a limit price -- because the v18.0
   /// fill bug came from booking entries the market never traded.
-  static TradeSignal? scalp3m(String sym, List<Candle> c3) {
-    if (c3.length < 60) return null;
+  /// Same decision, but every refusal is named.
+  ///
+  /// The 3M scalp refuses ~99.9% of bars, and before this the screen said
+  /// "0/400 coin-e 3M trend nei" while the quiet list underneath showed coins
+  /// with a clear bull/bear trend. Both statements were produced by different
+  /// code paths and only one of them was true. A mode this selective has to
+  /// count its refusals per CONDITION, or the empty screen is a mystery.
+  ///
+  /// Returns null only when a signal fired; otherwise the [Scalp3mWhy] that
+  /// stopped it. `gate` is checked first, so the funnel is a chain.
+  static TradeSignal? scalp3m(
+    String sym,
+    List<Candle> c3, {
+    void Function(String stage)? onRefuse,
+  }) {
+    void no(String stage) {
+      if (onRefuse != null) onRefuse(stage);
+    }
+
+    if (c3.length < 60) {
+      no('data');
+      return null;
+    }
     final px = c3.last.close;
-    if (px <= 0) return null;
+    if (px <= 0) {
+      no('data');
+      return null;
+    }
 
     final a14 = atrWilder(c3, period: 14);
-    if (a14 <= 0) return null;
+    if (a14 <= 0) {
+      no('data');
+      return null;
+    }
     final atrPct = a14 / px * 100;
-    if (atrPct < scalp3mGate) return null;
+    // The gate is the fee filter, so it is counted on its own: if this is the
+    // stage that eats the scan, no amount of indicator tuning will fill the
+    // screen -- the market is simply too quiet to scalp at 0.25%.
+    if (atrPct < scalp3mGate) {
+      no('gate');
+      return null;
+    }
 
     final closes = <double>[for (final k in c3) k.close];
     final e9 = ema(closes, 9);
     final e21 = ema(closes, 21);
     final e50 = ema(closes, 50);
     final r = rsi(closes, 14);
-    if (e50.isEmpty || r.isEmpty) return null;
+    if (e50.isEmpty || r.isEmpty) {
+      no('data');
+      return null;
+    }
     final e9n = e9.last, e21n = e21.last, e50n = e50.last, rn = r.last;
     final bar = c3.last;
 
     final up = e9n > e21n && e21n > e50n;
     final dn = e9n < e21n && e21n < e50n;
-    if (!up && !dn) return null;
+    if (!up && !dn) {
+      no('trend');
+      return null;
+    }
 
     final stop5Buy = <double>[for (final k in c3.sublist(c3.length - 5)) k.low]
         .reduce((x, y) => x < y ? x : y);
     final stop5Sell = <double>[for (final k in c3.sublist(c3.length - 5)) k.high]
         .reduce((x, y) => x > y ? x : y);
 
+    // Measured on real candles over 10 months, this "turn" confirmation is not
+    // optional: without it the same entry is NEGATIVE (-77.3% on the same 1070
+    // trades, -0.072% each). Relaxing the side/RSI/bar conditions to get more
+    // signals was measured and destroys the edge. Frequency therefore cannot be
+    // bought here -- it is bought by explaining the refusal instead.
+    final prevClose = c3[c3.length - 2].close;
     bool buy;
     if (up && px < e21n && rn >= 30 && rn <= 55 && bar.close > bar.open) {
       buy = true;
@@ -2891,6 +2936,21 @@ class Engine {
         bar.close < bar.open) {
       buy = false;
     } else {
+      if ((up && px >= e21n) || (dn && px <= e21n)) {
+        no('side');
+      } else if ((up && !(rn >= 30 && rn <= 55)) ||
+          (dn && !(rn >= 45 && rn <= 70))) {
+        no('rsi');
+      } else if ((up && bar.close <= bar.open) ||
+          (dn && bar.close >= bar.open)) {
+        no('bar');
+      } else {
+        no('side');
+      }
+      return null;
+    }
+    if (prevClose <= 0) {
+      no('data');
       return null;
     }
 
@@ -2898,9 +2958,15 @@ class Engine {
         ? (stop5Buy < px - a14 * 1.5 ? stop5Buy : px - a14 * 1.5)
         : (stop5Sell > px + a14 * 1.5 ? stop5Sell : px + a14 * 1.5);
     final risk = (sl - px).abs();
-    if (risk <= 0) return null;
+    if (risk <= 0) {
+      no('stop');
+      return null;
+    }
     final stopPct = risk / px * 100;
-    if (stopPct < scalp3mMinStop || stopPct > 8) return null;
+    if (stopPct < scalp3mMinStop || stopPct > 8) {
+      no('stop');
+      return null;
+    }
     final tp = buy ? px + risk * scalp3mRR : px - risk * scalp3mRR;
 
     // The fee in R, printed on the card: 0.25% round trip over the stop width.
@@ -3385,6 +3451,11 @@ class _HS extends State<HomeScreen> {
   int _failed = 0;
   int _noBias = 0;
   int _biasNoSetup = 0;
+
+  /// Why the 3M scalp refused each coin, by condition. Filled only in that
+  /// mode; the empty-state message reads it so a blank screen names the stage
+  /// that ate the scan instead of guessing.
+  final Map<String, int> _scalp3mWhy = <String, int>{};
   int _tooYoung = 0;
 
   /// Coins analysed with a shorter 4H window than the ideal 400 bars, because
@@ -3452,6 +3523,7 @@ class _HS extends State<HomeScreen> {
         _failed = 0;
         _noBias = 0;
         _biasNoSetup = 0;
+        _scalp3mWhy.clear();
         _tooYoung = 0;
         _short4h = 0;
         _delisted = 0;
@@ -3630,7 +3702,12 @@ class _HS extends State<HomeScreen> {
               if (mounted) setState(() => _tooYoung++);
             } else if (_mode.isScalp3m) {
               // Own path: no SMC scoring, no radar, no bias analysis.
-              var sig3 = Engine.scalp3m(sym, w15);
+              var sig3 = Engine.scalp3m(
+                sym,
+                w15,
+                onRefuse: (stage) => _scalp3mWhy[stage] =
+                    (_scalp3mWhy[stage] ?? 0) + 1,
+              );
               if (sig3 != null &&
                   coins[i].quoteVolume <= MarketData.preferredVolume) {
                 sig3 = sig3.asThin();
@@ -3638,7 +3715,9 @@ class _HS extends State<HomeScreen> {
               _Quiet? quiet3;
               if (sig3 == null && w15.length > 20) {
                 final px3 = w15.last.close;
-                final a3 = Engine.atr(w15, period: 14);
+                // Wilder, exactly like the gate. A simple ATR here would print
+                // a different percentage than the one that decided the refusal.
+                final a3 = Engine.atrWilder(w15, period: 14);
                 final cl = <double>[for (final k in w15) k.close];
                 final e9 = Engine.ema(cl, 9);
                 final e21 = Engine.ema(cl, 21);
@@ -3766,10 +3845,16 @@ class _HS extends State<HomeScreen> {
             '(${MarketData.cached4h})';
         // An empty list must explain itself: "no 4H trend" and "trend but no
         // 15M trigger" are completely different problems.
-        final why = _noBias >= _biasNoSetup
-            ? '$_noBias/$_total coin-e ${_mode.biasTf} trend nei'
-            : '$_biasNoSetup coin-e ${_mode.biasTf} trend ache, kintu '
-                '${_mode.triggerTf} trigger/zone mile nai';
+        // The 3M scalp has its own funnel and must not borrow the SMC wording:
+        // "0/400 coin-e 3M trend nei" was printed while the quiet list below
+        // showed bull and bear coins, because the SMC counters never ran in
+        // this mode. Name the stage that actually refused the coin.
+        final why = _mode.isScalp3m
+            ? _scalp3mWhyMessage()
+            : (_noBias >= _biasNoSetup
+                ? '$_noBias/$_total coin-e ${_mode.biasTf} trend nei'
+                : '$_biasNoSetup coin-e ${_mode.biasTf} trend ache, kintu '
+                    '${_mode.triggerTf} trigger/zone mile nai');
         final young =
             _tooYoung > 0
                 ? ' • $_tooYoung notun coin (${_mode.biasTf} history kom)'
@@ -3828,6 +3913,51 @@ class _HS extends State<HomeScreen> {
             : 'Exchange gulo block koreche ($detail). VPN on koro '
                 '(Japan/Hong Kong/Switzerland) tarpor Rescan.';
       });
+    }
+  }
+
+  /// One sentence naming the stage that stopped the 3M scalp.
+  ///
+  /// Each stage means something different to the user, so each gets its own
+  /// sentence rather than a shared "no setup":
+  ///
+  ///   gate  -- the coin is too quiet to pay the 0.25% fee. Nothing to do.
+  ///   trend -- EMA 9/21/50 not stacked. Wait.
+  ///   side  -- trend is there but price is NOT on the pullback side of
+  ///            EMA21, i.e. this is a chase, not a pullback. This is the
+  ///            stage that eats most of a trend day, and saying so is the
+  ///            difference between "broken" and "waiting for a dip".
+  ///   rsi   -- price is on the pullback side but RSI is not cooling yet.
+  ///   bar   -- everything lines up except the candle has not turned yet.
+  ///
+  /// The stage with the highest count is named first, with its own number, so
+  /// the sentence changes as the market changes instead of repeating a guess.
+  String _scalp3mWhyMessage() {
+    if (_scalp3mWhy.isEmpty) {
+      return '${_total} coin check kora hoise';
+    }
+    final ranked = _scalp3mWhy.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final top = ranked.first;
+    final n = top.value;
+    final gate = Engine.scalp3mGate.toStringAsFixed(2);
+    switch (top.key) {
+      case 'gate':
+        return '$n/$_total coin ATR $gate%-er niche — fee '
+            '${kCostPct.toStringAsFixed(2)}% uthano jabe na, tai signal nai';
+      case 'trend':
+        return '$n/$_total coin-e 3M EMA 9/21/50 stack nei (trend flat)';
+      case 'side':
+        return '$n/$_total coin-e trend ache kintu price EMA21-এর '
+            'pullback dike nei (chase hocche) — dip/counter-move er jonno wait';
+      case 'rsi':
+        return '$n/$_total coin pullback dike, kintu RSI ekhono thanda hoy nai';
+      case 'bar':
+        return '$n/$_total coin-e sob mile gechilo, sudhu candle turn kore nai';
+      case 'stop':
+        return '$n/$_total coin-e stop 0.35%-er kom chilo — fee e kheye jeto';
+      default:
+        return '$n/$_total coin-e data kom (notun listing)';
     }
   }
 
@@ -4083,8 +4213,7 @@ class _HS extends State<HomeScreen> {
             const SizedBox(height: 10),
             Text(
               _mode.isScalp3m
-                  ? '${_quiets.length} coin gate-e atke nai '
-                      '(beshi move kora age)'
+                  ? '${_quiets.length} coin analyse kora hoise, signal pay nai'
                   : '${_quiets.length} coin-e setup nei '
                       '(beshi move kora age)',
               style: const TextStyle(
@@ -4093,9 +4222,10 @@ class _HS extends State<HomeScreen> {
             const SizedBox(height: 3),
             Text(
               _mode.isScalp3m
-                  ? 'Egulo analyse kora hoise but 3M scalp rule pay nai. '
-                      'ATR ${Engine.scalp3mGate.toStringAsFixed(2)}%-er kom '
-                      'hole fee uthano jay na, tai skip.'
+                  ? 'Upore ATR ${Engine.scalp3mGate.toStringAsFixed(2)}%-er '
+                      'guloteo rule mile nai (trend/pullback/candle turn). '
+                      'Baki gulote ATR-i kom — fee '
+                      '${kCostPct.toStringAsFixed(2)}% uthano jabe na.'
                   : 'Egulo analyse kora hoise but kono setup pay nai. '
                       'Kom move korche, tai niche.',
               style: const TextStyle(color: K.muted, fontSize: 10, height: 1.4),
