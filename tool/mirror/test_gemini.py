@@ -65,8 +65,11 @@ def main():
           'gemini' not in main_src.split('_signals.sort(')[1].split('});')[0].lower())
     # The badge is additive: it is rendered next to the tier chip, and the
     # engine fields are read, never written.
-    check('the card badge only reads the note map',
-          '_geminiBadge(signal.symbol)' in main_src)
+    # v18.5: the chip is built by the screen and handed to the card, so the card
+    # cannot read (or write) any Gemini state at all.
+    check('the card badge is passed in, not built from the card',
+          'geminiBadge: _geminiBadge(items[k].symbol)' in main_src
+          and 'final Widget? geminiBadge;' in main_src)
 
     # ------------------------------------------------------- 3. off means off
     print('3. Gemini off sends nothing')
