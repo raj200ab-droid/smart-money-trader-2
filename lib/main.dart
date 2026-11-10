@@ -21,7 +21,7 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v17.3 · clean universe';
+const String kBuild = 'v17.4 · real stops';
 
 /// App version reported in the UI so an installed build is identifiable.
 ///
@@ -30,7 +30,7 @@ const String kBuild = 'v17.3 · clean universe';
 /// an APK named `...-17.0.0-20.apk` while the code was `17.1.0+21`. The release
 /// workflow now reads pubspec.yaml directly and `test_stamps` fails the build
 /// if this line drifts again.
-const String kVersionName = '17.3.0+23';
+const String kVersionName = '17.4.0+24';
 
 
 /// How the three timeframes are stacked.
@@ -55,6 +55,21 @@ enum TradeMode {
 
   String get label => this == TradeMode.swing ? 'Swing' : 'Scalp';
 }
+
+/// Smallest stop, as a fraction of price, that is worth taking.
+///
+/// Measured, not chosen by taste. On the scalp stack (30M/15M/5M) with a 0.25%
+/// round trip, 23 of 1323 trades carried a stop under 0.5%; those 23 were
+/// worth **-74.7R net between them**, and one had a 0.075% stop, where the fee
+/// alone is 3.35R. Refusing them moves net from -53.1R to +21.6R on the same
+/// trade list.
+///
+/// Device evidence that started this: SOL at 0.374% and BCH at 0.351%, both
+/// STRICT SELL 90%, both showing a +0.75% target that the fee eats a third of.
+///
+/// Swing is unaffected -- no swing trade in the sample had a stop under 1%
+/// (the 1H zone plus 0.25 x ATR200 never gets that tight).
+const double kMinStopPct = 0.005;
 
 /// Minimum reward:risk a trade must be able to offer. The structure target
 /// (15M swing) is accepted only at or above this; otherwise the target falls
@@ -636,30 +651,69 @@ class MarketData {
   /// They use a `B` suffix on the underlying ticker (NVDA -> NVDAB, MDBB,
   /// PENGB, UVXYB, BBB). Matching a suffix alone would be unsafe, so this is an
   /// explicit list, extended as Binance lists more.
+  /// EVERY bStock Binance has listed, as of November 2026.
+  ///
+  /// This list started at 5 and has now been wrong on a device **twice**:
+  /// v17.2 ranked Apple (AAPLB, 352.75) as a coin, and v17.3 ranked Strategy
+  /// (MSTRB, 123.03) as a STRICT SELL at 90%. Both were genuine spot USDT
+  /// pairs with real volume, so nothing in exchangeInfo or /ticker/24hr
+  /// distinguishes them -- the name is the only signal.
+  ///
+  /// Binance adds batches every few weeks (5 at launch -> 44 by Nov 2026), so
+  /// this is a snapshot and will go stale again. `test_universe.py` asserts
+  /// this exact set, which at least makes the next batch a one-line change
+  /// plus a failing test rather than another screenshot.
   static const Set<String> _tokenizedStocks = <String>{
-    // Launch set, June 2026.
-    'NVDABUSDT', // NVIDIA
-    'TSLABUSDT', // Tesla
+    // 11 June 2026 launch
     'CRCLBUSDT', // Circle
     'MUBUSDT',   // Micron
+    'NVDABUSDT', // NVIDIA
     'SNDKBUSDT', // SanDisk
-    'SPCXBUSDT', // SpaceX
-    // Batch 2, 29 July 2026 (10 new equity tokens).
-    'AAPLBUSDT', // Apple
-    'AMATBUSDT', // Applied Materials
-    'AMZNBUSDT', // Amazon
-    'BEBUSDT',   // Bloom Energy
-    'DELLBUSDT', // Dell
-    'FLNCBUSDT', // Fluence Energy
-    'GSBUSDT',   // Goldman Sachs
-    'PYPLBUSDT', // PayPal
-    'SMHBUSDT',  // VanEck Semiconductor ETF
-    'SOXSBUSDT', // Direxion Semiconductor Bear 3x ETF
-    // Earlier/other bStocks seen in the wild.
-    'MDBBUSDT',
-    'PENGBUSDT',
-    'UVXYBUSDT',
-    'BBBUSDT',
+    'TSLABUSDT', // Tesla
+    'SPCXBUSDT', // SpaceX (after its Nasdaq debut)
+    // 30 June 2026
+    'MSFTBUSDT', // Microsoft
+    'METABUSDT', // Meta
+    'PLTRBUSDT', // Palantir
+    'LITEBUSDT', // Lumentum
+    'QQQBUSDT',  // Invesco QQQ Trust
+    // July 2026
+    'AMDBUSDT',   // AMD
+    'EWYBUSDT',   // iShares MSCI South Korea ETF
+    'INTCBUSDT',  // Intel
+    'MSTRBUSDT',  // Strategy (MicroStrategy)
+    'COINBUSDT',  // Coinbase
+    'GOOGLBUSDT', // Alphabet
+    'HOODBUSDT',  // Robinhood
+    'IBMBUSDT',   // IBM
+    'NOKIABUSDT', // Nokia
+    // 29 July 2026
+    'AAPLBUSDT',  // Apple
+    'AMATBUSDT',  // Applied Materials
+    'AMZNBUSDT',  // Amazon
+    'BEBUSDT',    // Bloom Energy
+    'DELLBUSDT',  // Dell
+    'FLNCBUSDT',  // Fluence Energy
+    'GSBUSDT',    // Goldman Sachs
+    'PYPLBUSDT',  // PayPal
+    'SMHBUSDT',   // VanEck Semiconductor ETF
+    'SOXSBUSDT',  // Direxion Semiconductor Bear 3x ETF
+    // 5 August 2026
+    'ALABBUSDT',  // Astera Labs
+    'ASMLBUSDT',  // ASML
+    'ASTSBUSDT',  // AST SpaceMobile
+    'BMNRBUSDT',  // Bitmine Immersion
+    'COHRBUSDT',  // Coherent
+    'CRDOBUSDT',  // Credo Technology
+    'IRENBUSDT',  // IREN
+    'NFLXBUSDT',  // Netflix
+    'SMCIBUSDT',  // Super Micro Computer
+    'USARBUSDT',  // USA Rare Earth
+    // 14 October 2026
+    'BBBUSDT',   // BlackBerry
+    'MDBBUSDT',  // MongoDB
+    'PENGBUSDT', // Penguin Solutions
+    'UVXYBUSDT', // ProShares Ultra VIX Short-Term Futures ETF
   };
 
   /// Leveraged tokens end with UP/DOWN/BULL/BEAR/3L/3S *and* the base ticker
@@ -2560,6 +2614,7 @@ class Engine {
 
     final risk = (px - sl).abs();
     if (risk <= 0 || risk / px > 0.08) return null;
+    if (risk / px < kMinStopPct) return null;
 
     final tp = bull
         ? (t15.swingHigh != null && t15.swingHigh!.price > px * 1.005

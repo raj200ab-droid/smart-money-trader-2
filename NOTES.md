@@ -1205,3 +1205,67 @@ Released as tag `v17.3.0` (commit `c55d4e5`, CI `42829814562` success, release
 run `42830326423` success). Asset
 `smart-money-trader-v17.3-clean-universe-17.3.0-23.apk`, 20.6 MB, download link
 returns 302.
+
+## 28. v17.4 — MSTRB, and the stop that was smaller than the fee
+
+Second device screenshot after v17.3. The fixes that shipped worked: footer
+read `30M cache`, badges read `30M / 15M / 5M`, cards were STRICT at 90% with no
+thin-book banner. Two things were still wrong.
+
+### Bug 1 — MSTRB: the bStock list went stale again, in one release
+
+Top-4 cards included **`MSTRB · 123.0300 · SELL 90% STRICT`**. MSTRB is
+Binance's bStock for Strategy (MicroStrategy). The v17.3 list knew 20 tickers;
+Binance has **44**. Still leaking: ALABB, AMDB, ASMLB, ASTSB, BMNRB, COHRB,
+COINB, CRDOB, EWYB, GOOGLB, HOODB, IBMB, INTCB, IRENB, LITEB, METAB, MSFTB,
+MSTRB, NFLXB, NOKIAB, PLTRB, QQQB, SMCIB, USARB.
+
+This has now been wrong **twice in two releases**, which is the real lesson: an
+explicit snapshot list cannot keep up with a product Binance extends in batches
+every week or two. The list is now complete at 44 (sourced from the bStocks
+launch announcements June–October 2026), and `test_universe.py` asserts the
+whole set, so the next batch fails a test instead of appearing on a screenshot.
+
+A suffix rule (`ends with B`) was considered and rejected: it would swallow real
+tickers. `test_universe.py` now pins that `ARB`, `BNB`, `WB`, `JUP` survive.
+
+### Bug 2 — a stop narrower than the round-trip fee (measured, then fixed)
+
+    SOL   entry 85.1900  SL 85.5086  STOP 0.374%  TP 0.748%
+    BCH   entry 236.5000 SL 237.3304 STOP 0.351%  TP 0.702%
+
+Both STRICT SELL at 90%. At the app's own 0.25% round trip the fee is **67–71%
+of one R**; the +0.75% target is a third eaten before the trade opens. One trade
+in the mirror had a **0.075%** stop, where the fee alone is **3.35R**.
+
+Measured with `measure_min_stop.py` on 1323 scalp trades:
+
+| floor | refused | their gross | their net | net without them |
+|---|---|---|---|---|
+| 0.3% | 15 | −12.0 | −64.9 | +11.8 |
+| **0.5%** | **23** | **−17.0** | **−74.7** | **+21.6** |
+| 0.8% | 60 | +14.1 | −56.9 | +3.8 |
+| 1.0% | 95 | +10.3 | −70.5 | +17.4 |
+
+Baseline net −53.1R. A 0.5% floor removes 23 trades worth −74.7R between them,
+so the same trade list becomes **+21.6R**. Swing is untouched — no swing trade
+in the sample had a stop under 1%.
+
+**Method note, because the first number I printed was wrong.** The naive
+comparison (run the walk with and without the floor, compare totals) said
+**+24.0R**. That figure is meaningless: `walk()` opens one trade at a time and
+blocks re-entry, so adding a floor deletes one trade *and shifts every later
+entry*. The two totals describe different sequences, not a better rule. The
+honest read removes the trades from the *same* list and asks what they were
+worth — +21.6R. The numbers are close only by coincidence; the mechanism is not
+the one the naive comparison implies. `measure_min_stop.py` now prints the
+refusal report and labels the per-floor totals as non-comparable.
+
+### Not a bug
+
+`16 signal · 93 watch · 1 radar` with `ALL 110` is consistent (16+93+1=110), and
+`BUY 11 + SELL 99 = 110`. A 90% SELL skew across SOL/BCH/ETH is the market plus
+`30M bearish bias` on correlated majors, not a scoring asymmetry.
+
+Verification: tree-sitter 0 errors, `test_stamps` PASS, `test_mirror` PASS
+(now also pins kMinStopPct against mirror.MIN_STOP_PCT), `test_universe` PASS.

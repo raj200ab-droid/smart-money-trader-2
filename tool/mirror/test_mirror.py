@@ -61,6 +61,12 @@ def test_mirror_is_the_dart_thresholds():
     assert 'static const int internalLen = 5;' in src
     assert mirror.STRICT == 60.0 and mirror.WATCH == 40.0
     assert mirror.SWING_LEN == 50 and mirror.INTERNAL_LEN == 5
+    # The minimum-stop floor exists in both places and must stay equal: it is
+    # the one gate the device evidence (SOL 0.374%, BCH 0.351%) is sensitive to.
+    assert 'const double kMinStopPct = 0.005;' in src, \
+        'Dart kMinStopPct changed: update mirror.MIN_STOP_PCT'
+    assert mirror.MIN_STOP_PCT == 0.5, \
+        f'mirror.MIN_STOP_PCT is {mirror.MIN_STOP_PCT}, Dart says 0.5'
     print('  thresholds match lib/main.dart: PASS')
 
 

@@ -18,6 +18,14 @@ STRICT = 60.0
 WATCH = 40.0
 TIGHT_STOP = False   # measured: tightening the stop to the 15M swing made net worse
 MIN_RR = 1.5
+# Reject stops narrower than this. Device evidence (v17.3 scalp): SOL 0.374%,
+# BCH 0.351%, both showing a +0.75% target the 0.25% fee eats a third of.
+# Measured on 1323 scalp trades: 23 of them sat under 0.5% and were worth
+# -74.7R net BETWEEN THEM (one had a 0.075% stop, where the fee alone is
+# 3.35R). Refusing them moves net from -53.1R to +21.6R on the same trade list.
+# Swing is untouched: no swing trade in the sample had a stop under 1%.
+# See measure_min_stop.py -- do not change this number without rerunning it.
+MIN_STOP_PCT = 0.5
 MAX_STOP_PCT = 8.0    # measured: capping at 2.5% cut the only net-positive bucket
 
 
@@ -337,7 +345,7 @@ def analyze(c, tf='15M'):
 
 # --------------------------------------------------------------------- multiTF
 def multi_tf(c4, c1, c15, relaxed=False, tp_mode='swing', tp_pct=1.05,
-             fresh_only=False, fresh_bars=0):
+             fresh_only=False, fresh_bars=0, min_stop_pct=None):
     """Mirror of Engine.multiTF.
 
     tp_mode='swing' reproduces the app: TP is the 15M swing high/low when it is
@@ -448,6 +456,9 @@ def multi_tf(c4, c1, c15, relaxed=False, tp_mode='swing', tp_pct=1.05,
             risk = entry - sl
             if risk <= 0 or risk / entry > MAX_STOP_PCT / 100.0:
                 return None
+            floor = MIN_STOP_PCT if min_stop_pct is None else min_stop_pct
+            if floor and risk / entry < floor / 100.0:
+                return None
             if tp_mode == 'pct':
                 tp = entry * (1 + tp_pct / 100.0)
             else:
@@ -501,7 +512,8 @@ def multi_tf(c4, c1, c15, relaxed=False, tp_mode='swing', tp_pct=1.05,
 
 # ---------------------------------------------------------------- walk forward
 def walk(c4, c1, c15, step=1, window=200, window4h=400, max_trades=200,
-         tp_mode='swing', tp_pct=1.05, fresh_only=False, fresh_bars=0):
+         tp_mode='swing', tp_pct=1.05, fresh_only=False, fresh_bars=0,
+         min_stop_pct=None):
     """Mirror of Backtester.run. No look-ahead, one trade at a time."""
     trades = []
     n = len(c15)
@@ -529,10 +541,11 @@ def walk(c4, c1, c15, step=1, window=200, window4h=400, max_trades=200,
         if w1 is None or w4 is None:
             continue
         sig = (multi_tf(w4, w1, w15, tp_mode=tp_mode, tp_pct=tp_pct,
-                        fresh_only=fresh_only, fresh_bars=fresh_bars)
+                        fresh_only=fresh_only, fresh_bars=fresh_bars,
+                        min_stop_pct=min_stop_pct)
                or multi_tf(w4, w1, w15, relaxed=True, tp_mode=tp_mode,
                            tp_pct=tp_pct, fresh_only=fresh_only,
-                           fresh_bars=fresh_bars))
+                           fresh_bars=fresh_bars, min_stop_pct=min_stop_pct))
         if sig is None:
             continue
         is_buy = sig['direction'] == 'BUY'
