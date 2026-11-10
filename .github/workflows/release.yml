@@ -43,6 +43,9 @@ jobs:
       - name: Enable network permission for release builds
         run: python3 tool/patch_manifest.py
 
+      - name: Add device storage for the Gemini key
+        run: python3 tool/patch_prefs.py
+
       - name: Stamp test
         run: python3 tool/mirror/test_stamps.py
 

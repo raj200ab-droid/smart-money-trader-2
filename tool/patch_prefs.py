@@ -1,0 +1,208 @@
+"""Add the device-storage channel that keeps the Gemini key across restarts.
+
+Why this patch exists instead of a dependency
+---------------------------------------------
+The Gemini key has to survive an app restart. The usual answer is
+`shared_preferences`, but adding it means `flutter pub get` has to fetch a new
+package from pub.dev during the release build, and this project has already
+been bitten by build-time network steps. The key is one short string, so the
+plugin's own storage is replaced by ~40 lines of Kotlin using the same
+Android API (`Context.getSharedPreferences` in the app's private sandbox).
+
+The patch is idempotent: it is applied to the `flutter create` scaffolding in
+CI, and running it twice is a no-op. It writes:
+
+    MainActivity.kt            -- onCreate installs the channel
+    GeminiPrefs.kt             -- the get/set handler
+
+and fails loudly if the generated MainActivity does not look like what it
+expects, because silently shipping a build where the key is forgotten would be
+worse than failing the build.
+"""
+
+import pathlib
+import re
+import sys
+
+ORG = "com.smartmoney"
+APP = "smart_money_trader"
+CHANNEL = "com.smartmoney.smart_money_trader/prefs"
+
+PREFS_KT = """package {pkg}
+
+import android.content.Context
+import io.flutter.plugin.common.MethodCall
+import io.flutter.plugin.common.MethodChannel
+
+/**
+ * Minimal string store on top of the app-private SharedPreferences file.
+ *
+ * This exists so the Gemini API key survives a restart without pulling
+ * shared_preferences (and a pub.dev fetch) into the release build. It stores
+ * strings only and never logs the values.
+ */
+class GeminiPrefs(private val context: Context) : MethodChannel.MethodCallHandler {{
+    private val prefs =
+        context.getSharedPreferences("smart_money_prefs", Context.MODE_PRIVATE)
+
+    override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {{
+        when (call.method) {{
+            "getString" -> {{
+                val key = call.argument<String>("key")
+                if (key == null) {{
+                    result.error("bad_args", "key missing", null)
+                }} else {{
+                    result.success(prefs.getString(key, "") ?: "")
+                }}
+            }}
+            "setString" -> {{
+                val key = call.argument<String>("key")
+                val value = call.argument<String>("value")
+                if (key == null || value == null) {{
+                    result.error("bad_args", "key/value missing", null)
+                }} else {{
+                    prefs.edit().putString(key, value).apply()
+                    result.success(null)
+                }}
+            }}
+            "clear" -> {{
+                val key = call.argument<String>("key")
+                if (key == null) {{
+                    result.error("bad_args", "key missing", null)
+                }} else {{
+                    prefs.edit().remove(key).apply()
+                    result.success(null)
+                }}
+            }}
+            else -> result.notImplemented()
+        }}
+    }}
+}}
+"""
+
+
+def find_main_activity(root: pathlib.Path):
+    """Locate the MainActivity that `flutter create` generated for this app."""
+    for p in root.rglob("MainActivity.kt"):
+        return p
+    for p in root.rglob("MainActivity.java"):
+        return p
+    return None
+
+
+def patch_main_activity(path: pathlib.Path) -> bool:
+    """Install the channel in onCreate. Returns True when it was added."""
+    text = path.read_text(encoding="utf-8")
+    if CHANNEL in text:
+        print("channel already installed in", path)
+        return False
+    pkg = f"{ORG}.{APP}"
+    if path.suffix == ".kt":
+        if "onCreate" in text:
+            # Insert the call at the top of the existing onCreate body.
+            text = re.sub(
+                r"(override fun onCreate\(savedInstanceState: Bundle\?\)\s*\{)",
+                r"\1\n        installGeminiPrefs()",
+                text,
+                count=1,
+            )
+        else:
+            # `class MainActivity : FlutterActivity()` has an EMPTY body. Adding
+            # onCreate inside it means opening a new block, so the original
+            # statement has to become `FlutterActivity() {` and a closing brace
+            # has to balance it. Getting this wrong produces Kotlin that the
+            # build rejects, so the brace count is checked below.
+            text = text.replace(
+                "class MainActivity : FlutterActivity()",
+                "class MainActivity : FlutterActivity() {\n"
+                "    override fun onCreate(savedInstanceState: Bundle?) {\n"
+                "        super.onCreate(savedInstanceState)\n"
+                "        installGeminiPrefs()\n"
+                "    }\n",
+                1,
+            )
+            text = text.rstrip() + "\n}\n"
+        # imports
+        for imp in (
+            "import android.os.Bundle",
+            "import io.flutter.plugin.common.MethodChannel",
+        ):
+            if imp not in text:
+                text = text.replace("import io.flutter.embedding.android.FlutterActivity",
+                                    imp + "\nimport io.flutter.embedding.android.FlutterActivity",
+                                    1)
+        helper = (
+            "\n    /** Device storage for the Gemini key. See tool/patch_prefs.py. */\n"
+            "    private fun installGeminiPrefs() {\n"
+            f'        MethodChannel(flutterEngine!!.dartExecutor.binaryMessenger,\n'
+            f'            "{CHANNEL}")\n'
+            "            .setMethodCallHandler(GeminiPrefs(applicationContext))\n"
+            "    }\n"
+        )
+        # put the helper inside the class: before the final closing brace
+        idx = text.rstrip().rfind("}")
+        text = text[:idx] + helper + text[idx:]
+    else:
+        # Java fallback: keep it simple and correct rather than clever.
+        if "onCreate" in text:
+            text = text.replace(
+                "protected void onCreate(Bundle savedInstanceState) {",
+                "protected void onCreate(Bundle savedInstanceState) {\n"
+                "        installGeminiPrefs();",
+                1,
+            )
+        else:
+            print("error: generated MainActivity.java has no onCreate to patch",
+                  file=sys.stderr)
+            return False
+        helper = (
+            "\n    private void installGeminiPrefs() {\n"
+            "        new io.flutter.plugin.common.MethodChannel(\n"
+            "            getFlutterEngine().getDartExecutor().getBinaryMessenger(),\n"
+            f'            "{CHANNEL}")\n'
+            "            .setMethodCallHandler(new GeminiPrefs(getApplicationContext()));\n"
+            "    }\n"
+        )
+        idx = text.rstrip().rfind("}")
+        text = text[:idx] + helper + text[idx:]
+    # A missing brace in generated Kotlin is a build failure 2 minutes later
+    # with an unhelpful message, so fail here with a useful one.
+    if text.count("{") != text.count("}"):
+        print(f"error: unbalanced braces after patch ({text.count('{')} open, "
+              f"{text.count('}')} close)", file=sys.stderr)
+        return False
+    path.write_text(text, encoding="utf-8")
+    print("installed prefs channel in", path)
+    return True
+
+
+def main() -> int:
+    root = pathlib.Path("android")
+    if not root.is_dir():
+        print("error: android/ not found -- run after flutter create", file=sys.stderr)
+        return 1
+    act = find_main_activity(root)
+    if act is None:
+        print("error: no MainActivity found", file=sys.stderr)
+        return 1
+    pkg = act.parent.as_posix().split("java/")[-1].replace("/", ".")
+    prefs = act.parent / "GeminiPrefs.kt"
+    prefs.write_text(PREFS_KT.format(pkg=pkg), encoding="utf-8")
+    print("wrote", prefs)
+
+    if not patch_main_activity(act):
+        return 1
+
+    # verify
+    if CHANNEL not in act.read_text(encoding="utf-8"):
+        print("error: channel not present after patch", file=sys.stderr)
+        return 1
+    if not prefs.is_file():
+        print("error: GeminiPrefs.kt missing", file=sys.stderr)
+        return 1
+    print("verify: channel + handler in place")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -7,6 +7,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 
+import 'gemini.dart';
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   SystemChrome.setPreferredOrientations(<DeviceOrientation>[
@@ -21,7 +23,7 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v18.3 · 3M scalp says why';
+const String kBuild = 'v18.4 · Gemini advisor';
 
 /// App version reported in the UI so an installed build is identifiable.
 ///
@@ -30,7 +32,7 @@ const String kBuild = 'v18.3 · 3M scalp says why';
 /// an APK named `...-17.0.0-20.apk` while the code was `17.1.0+21`. The release
 /// workflow now reads pubspec.yaml directly and `test_stamps` fails the build
 /// if this line drifts again.
-const String kVersionName = '18.3.0+28';
+const String kVersionName = '18.4.0+29';
 
 
 /// How the three timeframes are stacked.
@@ -3452,6 +3454,16 @@ class _HS extends State<HomeScreen> {
   int _noBias = 0;
   int _biasNoSetup = 0;
 
+  /// Gemini config and per-symbol reviews.
+  ///
+  /// `_gemini` is loaded once and saved only from the settings sheet; the
+  /// reviews are keyed by symbol so a re-scan does not re-ask (and does not
+  /// re-bill) for a setup that has not changed.
+  GeminiConfig _gemini = const GeminiConfig();
+  final Map<String, GeminiNote> _gNotes = <String, GeminiNote>{};
+  final Set<String> _gInFlight = <String>{};
+  GeminiNote? _gScanNote;
+
   /// Why the 3M scalp refused each coin, by condition. Filled only in that
   /// mode; the empty-state message reads it so a blank screen names the stage
   /// that ate the scan instead of guessing.
@@ -3478,8 +3490,30 @@ class _HS extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    _loadGemini();
     run();
     _restartTimer();
+  }
+
+  Future<void> _loadGemini() async {
+    final c = await GeminiStore.load();
+    if (!mounted) return;
+    setState(() => _gemini = c);
+    // A key already on the device should review the list that is on screen,
+    // not wait for the user to notice a settings button.
+    if (c.usable && c.autoReview) _autoReview();
+  }
+
+  Future<void> _saveGemini(GeminiConfig c) async {
+    await GeminiStore.save(c);
+    if (!mounted) return;
+    setState(() {
+      _gemini = c;
+      // A changed key or model invalidates every stored review.
+      _gNotes.clear();
+      _gScanNote = null;
+    });
+    if (c.usable && c.autoReview) _autoReview();
   }
 
   /// Auto-refresh cadence follows the mode.
@@ -3899,6 +3933,12 @@ class _HS extends State<HomeScreen> {
                 '${_failed > 0 ? ' • $_failed coin skip' : ''}$young'
                 '$funnel$cacheNote';
       });
+      // Reviews start only after the list is on screen. They are fire-and-
+      // forget: a scan must never wait on a model, and a failing review must
+      // never turn into a failed scan.
+      if (_gemini.usable && _gemini.autoReview && _signals.isNotEmpty) {
+        unawaited(_autoReview());
+      }
     } catch (e) {
       if (!mounted || id != _scanId) return;
       var detail = e.toString().replaceAll('MarketDataException: ', '');
@@ -3914,6 +3954,273 @@ class _HS extends State<HomeScreen> {
                 '(Japan/Hong Kong/Switzerland) tarpor Rescan.';
       });
     }
+  }
+
+  // ---------------------------------------------------------------- Gemini
+  //
+  // Everything below is additive. Nothing here touches `_signals`: a signal's
+  // tier, entry, stop, target and position in the list are decided by the
+  // engine and stay identical whether Gemini is on or off. A review that says
+  // AVOID does NOT remove the card; it puts a red note on it. That separation
+  // is the whole reason this can be shipped at all.
+
+  /// Ask for reviews of the top signals of the current scan.
+  ///
+  /// Kept to the top few on purpose: every request is the user's own quota,
+  /// and 40 reviews of coins they will never open is not a feature.
+  Future<void> _autoReview() async {
+    if (!_gemini.usable || _signals.isEmpty) return;
+    final top = _signals.take(3).map((s) => s.symbol).toList();
+    for (final sym in top) {
+      final sig = _signals.firstWhere((s) => s.symbol == sym);
+      unawaited(_reviewOne(sig));
+    }
+    if (_gScanNote == null) unawaited(_reviewScan());
+  }
+
+  Future<void> _reviewScan() async {
+    if (!_gemini.usable || _signals.isEmpty) return;
+    final note = await GeminiService.reviewScan(
+      apiKey: _gemini.apiKey,
+      model: _gemini.model,
+      modeLabel: '${_mode.label} ${_mode.biasTf}/${_mode.zoneTf}/'
+          '${_mode.triggerTf}',
+      coinsScanned: _total,
+      marketNote: _msg,
+      signals: _signals
+          .take(12)
+          .map((s) => <String, dynamic>{
+                'symbol': s.coin,
+                'direction': s.direction,
+                'tier': s.tier,
+                'confidence': s.confidence.toStringAsFixed(0),
+                'rr': s.rr.toStringAsFixed(2),
+                'riskPct': s.riskPct.toStringAsFixed(2),
+                'rewardPct': s.profitPct.toStringAsFixed(2),
+              })
+          .toList(),
+    );
+    if (!mounted) return;
+    setState(() => _gScanNote = note);
+  }
+
+  /// One signal. Deliberately not awaited by the caller: a slow model must
+  /// never delay a scan or a rebuild.
+  Future<void> _reviewOne(TradeSignal s) async {
+    if (!_gemini.usable) return;
+    if (_gInFlight.contains(s.symbol)) return;
+    setState(() => _gInFlight.add(s.symbol));
+    final note = await GeminiService.reviewSignal(
+      apiKey: _gemini.apiKey,
+      model: _gemini.model,
+      modeLabel: _mode.label,
+      timeframes:
+          '${_mode.biasTf}/${_mode.zoneTf}/${_mode.triggerTf}',
+      symbol: s.symbol,
+      direction: s.direction,
+      tier: s.tier,
+      entry: s.entry,
+      sl: s.sl,
+      tp: s.tp,
+      price: s.price,
+      confidence: s.confidence,
+      rr: s.rr,
+      riskPct: s.riskPct,
+      rewardPct: s.profitPct,
+      confirmations: s.confirmations,
+      pattern: s.pattern,
+      zone: s.zone,
+      structure: '${_mode.biasTf}: ${s.tf4h} | '
+          '${_mode.zoneTf}: ${s.tf1h} | ${_mode.triggerTf}: ${s.tf15m}',
+      chop: s.chop,
+      costPct: kCostPct,
+    );
+    if (!mounted) return;
+    setState(() {
+      _gInFlight.remove(s.symbol);
+      _gNotes[s.symbol] = note;
+    });
+  }
+
+  /// The little badge on a signal card. Shows the model's stance, or a spinner
+  /// while a review is in flight, or nothing at all when Gemini is off.
+  Widget? _geminiBadge(String symbol) {
+    final note = _gNotes[symbol];
+    final busy = _gInFlight.contains(symbol);
+    if (note == null && !busy) return null;
+    Color c;
+    String label;
+    if (busy) {
+      c = K.muted;
+      label = 'AI';
+    } else if (!note!.ok) {
+      c = K.muted;
+      label = 'AI !';
+    } else if (note.stance == 'AVOID') {
+      c = K.red;
+      label = 'AI: avoid';
+    } else if (note.stance == 'CAUTION') {
+      c = K.orange;
+      label = 'AI: caution';
+    } else if (note.stance == 'AGREE') {
+      c = K.blue;
+      label = 'AI: agree';
+    } else {
+      c = K.blue;
+      label = 'AI';
+    }
+    return Container(
+      margin: const EdgeInsets.only(right: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+      decoration: BoxDecoration(
+        color: c.withOpacity(0.18),
+        borderRadius: BorderRadius.circular(3),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          if (busy)
+            SizedBox(
+              width: 7,
+              height: 7,
+              child: CircularProgressIndicator(strokeWidth: 1, color: c),
+            )
+          else
+            Icon(Icons.auto_awesome, size: 8, color: c),
+          const SizedBox(width: 2),
+          Text(
+            label,
+            style: TextStyle(
+                color: c, fontSize: 8, fontWeight: FontWeight.bold),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// The full review, rendered in the details sheet. Parsed loosely: the model
+  /// is told to answer in a fixed shape, but a model that drifts must not break
+  /// the screen, so the raw text is shown when the shape is missing.
+  Widget _geminiSection(TradeSignal s) {
+    final note = _gNotes[s.symbol];
+    final busy = _gInFlight.contains(s.symbol);
+    final rows = <Widget>[];
+    if (busy) {
+      rows.add(const Padding(
+        padding: EdgeInsets.symmetric(vertical: 10),
+        child: Row(
+          children: <Widget>[
+            SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(
+                  strokeWidth: 1.5, color: K.blue),
+            ),
+            SizedBox(width: 8),
+            Text('Gemini dekhche...',
+                style: TextStyle(color: K.muted, fontSize: 11)),
+          ],
+        ),
+      ));
+    } else if (note == null) {
+      rows.add(const Text(
+        'Ei signal er kono review nei.',
+        style: TextStyle(color: K.muted, fontSize: 11),
+      ));
+    } else if (!note.ok) {
+      rows.add(Text(
+        note.error,
+        style: const TextStyle(color: K.orange, fontSize: 11, height: 1.4),
+      ));
+    } else {
+      final c = note.stance == 'AVOID'
+          ? K.red
+          : note.stance == 'CAUTION'
+              ? K.orange
+              : K.blue;
+      for (final line in note.text.split('\n')) {
+        final t = line.trim();
+        if (t.isEmpty) continue;
+        final m = RegExp(r'^(STANCE|CONFIDENCE|WHY|RISK|WHEN)\s*:\s*(.*)$')
+            .firstMatch(t);
+        if (m == null) {
+          rows.add(Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Text(t,
+                style: const TextStyle(
+                    color: K.text, fontSize: 11, height: 1.45)),
+          ));
+        } else {
+          rows.add(Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: RichText(
+              text: TextSpan(
+                children: <InlineSpan>[
+                  TextSpan(
+                    text: '${m.group(1)} ',
+                    style: TextStyle(
+                      color: m.group(1) == 'STANCE' ? c : K.muted,
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  TextSpan(
+                    text: m.group(2),
+                    style: const TextStyle(
+                        color: K.text, fontSize: 11, height: 1.45),
+                  ),
+                ],
+              ),
+            ),
+          ));
+        }
+      }
+      rows.add(Text(
+        '${note.model} · ${timeAgo(note.at)}',
+        style: const TextStyle(color: K.muted, fontSize: 9),
+      ));
+    }
+    return Container(
+      margin: const EdgeInsets.only(top: 20),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: K.panel2,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: K.line),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              const Icon(Icons.auto_awesome, size: 14, color: K.blue),
+              const SizedBox(width: 6),
+              const Text(
+                'Gemini second opinion',
+                style: TextStyle(
+                    color: K.text,
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold),
+              ),
+              const Spacer(),
+              if (!busy)
+                GestureDetector(
+                  onTap: () => _reviewOne(s),
+                  child: const Text('again',
+                      style: TextStyle(color: K.blue, fontSize: 10)),
+                ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            'Engine er number na — ei review signal change kore na.',
+            style: TextStyle(color: K.muted, fontSize: 9, height: 1.3),
+          ),
+          const SizedBox(height: 10),
+          ...rows,
+        ],
+      ),
+    );
   }
 
   /// One sentence naming the stage that stopped the 3M scalp.
@@ -3992,6 +4299,22 @@ class _HS extends State<HomeScreen> {
           ],
         ),
         actions: <Widget>[
+          IconButton(
+            icon: Icon(
+              Icons.auto_awesome,
+              color: _gemini.usable ? K.blue : K.muted,
+            ),
+            tooltip: _gemini.usable
+                ? 'Gemini: ${_gemini.model}'
+                : 'Gemini key add koro',
+            onPressed: () {
+              showGeminiSettings(
+                context,
+                current: _gemini,
+                onSaved: _saveGemini,
+              );
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.show_chart, color: K.text),
             tooltip: 'MACD buy (3M)',
@@ -4204,6 +4527,67 @@ class _HS extends State<HomeScreen> {
   List<_Quiet> get _quietShown =>
       _quiets.length <= 40 ? _quiets : _quiets.sublist(0, 40);
 
+  /// The scan-level Gemini note: one card, dismissible, clearly not a signal.
+  Widget _scanNoteCard(GeminiNote note) {
+    final c = note.stance == 'AVOID'
+        ? K.red
+        : note.stance == 'CAUTION'
+            ? K.orange
+            : K.blue;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: K.panel,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: c.withOpacity(0.5)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Icon(Icons.auto_awesome, size: 13, color: c),
+              const SizedBox(width: 6),
+              Text(
+                note.isScan ? 'Gemini: ei scan niye' : 'Gemini',
+                style: const TextStyle(
+                    color: K.text,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold),
+              ),
+              const Spacer(),
+              if (note.isScan)
+                GestureDetector(
+                  onTap: _reviewScan,
+                  child: const Text('again',
+                      style: TextStyle(color: K.blue, fontSize: 10)),
+                ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (!note.ok)
+            Text(note.error,
+                style: const TextStyle(
+                    color: K.orange, fontSize: 11, height: 1.4))
+          else
+            Text(
+              note.text
+                  .replaceAll(RegExp(r'^(STANCE|CONFIDENCE)\s*:\s*',
+                      multiLine: true), ''),
+              style: const TextStyle(
+                  color: K.text, fontSize: 11, height: 1.45),
+            ),
+          const SizedBox(height: 6),
+          Text(
+            '${note.model} · opinion, not a signal · ${timeAgo(note.at)}',
+            style: const TextStyle(color: K.muted, fontSize: 9),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _quietHeader() => Padding(
         padding: const EdgeInsets.only(top: 14, bottom: 8, left: 2),
         child: Column(
@@ -4377,6 +4761,13 @@ class _HS extends State<HomeScreen> {
       );
     }
 
+    // A scan-level review, if there is one, rides above the list as its own
+    // card. It never adds a row to the signal list and never removes one.
+    final head = <Widget>[
+      if (_gScanNote != null && (_gScanNote!.ok || _gemini.usable))
+        _scanNoteCard(_gScanNote!),
+    ];
+
     return RefreshIndicator(
       onRefresh: run,
       color: K.green,
@@ -4388,17 +4779,20 @@ class _HS extends State<HomeScreen> {
         // coin at the top), then a divider, then the coins that were analysed
         // and produced nothing. Separating them keeps "a signal is below a
         // non-signal" from ever happening.
-        itemCount: items.length +
+        itemCount: head.length +
+            items.length +
             (_quiets.isEmpty ? 0 : 1 + _quietShown.length),
         itemBuilder: (context, i) {
-          if (i < items.length) {
+          if (i < head.length) return head[i];
+          final k = i - head.length;
+          if (k < items.length) {
             return _SignalCard(
-              signal: items[i],
-              onTap: () => _showDetails(items[i]),
+              signal: items[k],
+              onTap: () => _showDetails(items[k]),
             );
           }
-          if (i == items.length) return _quietHeader();
-          return _quietRow(_quietShown[i - items.length - 1]);
+          if (k == items.length) return _quietHeader();
+          return _quietRow(_quietShown[k - items.length - 1]);
         },
       ),
     );
@@ -4554,6 +4948,8 @@ class _HS extends State<HomeScreen> {
                 _detailRow('${s.mode.zoneTf} structure', s.tf1h),
                 _detailRow('${s.mode.triggerTf} structure', s.tf15m),
                 _detailRow('Generated', timeAgo(s.time)),
+                if (_gemini.usable || _gNotes.containsKey(s.symbol))
+                  _geminiSection(s),
                 const SizedBox(height: 20),
                 Container(
                   padding: const EdgeInsets.all(12),
@@ -4709,6 +5105,11 @@ class _SignalCard extends StatelessWidget {
                               ),
                             );
                           }),
+                          // A model opinion sits next to the tier chip, never
+                          // inside it: the tier is the engine's, the badge is
+                          // somebody else's view of the same trade.
+                          if (_geminiBadge(signal.symbol) != null)
+                            _geminiBadge(signal.symbol) as Widget,
                           Flexible(
                             child: Text(
                               '${signal.direction} • ${signal.pattern} • '

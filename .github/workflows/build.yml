@@ -30,6 +30,7 @@ jobs:
           python3 tool/mirror/test_universe.py
           python3 tool/mirror/test_3m_order.py
           python3 tool/mirror/test_3m_scalp.py
+          python3 tool/mirror/test_gemini.py
 
       - name: Create Android Project
         run: |
@@ -43,6 +44,9 @@ jobs:
 
       - name: Enable network permission for release builds
         run: python3 tool/patch_manifest.py
+
+      - name: Add device storage for the Gemini key
+        run: python3 tool/patch_prefs.py
 
       - name: Get Dependencies
         run: flutter pub get

@@ -56,10 +56,15 @@ def main():
     check('quiet coins collected in scalp3m',
           'quiet3 = _Quiet(sym, px3 > 0 ? a3 / px3 * 100 : 0, tr);' in src)
 
+    # v18.4 puts an optional Gemini note above everything, which shifts the
+    # index every section uses. The invariant worth pinning is the ORDER:
+    # header (0 or 1) -> signals -> divider -> quiets.
     check('quiet coins rendered below the signals',
           '_quietHeader()' in src and '_quietRow' in src
-          and 'if (i < items.length) {' in src,
-          'signals first, then a divider, then the quiet ones')
+          and 'final k = i - head.length;' in src
+          and src.find('if (k < items.length)') <
+          src.find('if (k == items.length) return _quietHeader();'),
+          'header first, then signals, then the divider, then the quiets')
 
     check('quiet list is capped',
           '_quiets.length <= 40 ? _quiets : _quiets.sublist(0, 40)' in src,
