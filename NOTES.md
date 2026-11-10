@@ -1200,3 +1200,8 @@ dropped 118.
 
 Verification: tree-sitter 0 errors, `test_stamps` PASS, `test_mirror` PASS,
 `test_universe` PASS (6 assertions incl. 2 new).
+
+Released as tag `v17.3.0` (commit `c55d4e5`, CI `42829814562` success, release
+run `42830326423` success). Asset
+`smart-money-trader-v17.3-clean-universe-17.3.0-23.apk`, 20.6 MB, download link
+returns 302.
