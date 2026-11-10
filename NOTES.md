@@ -1439,3 +1439,137 @@ carried that commit plus the earlier v18.1 commit). Fetching and replaying the
 work on top of `origin` (cherry-pick, resolving the four conflicted files to the
 worktree copy) produced `008b2aa`, which pushed cleanly. All four test scripts
 were re-run on the resolved tree before pushing.
+
+## 31. v18.2 — a real 3M scalping mode, and the first numbers measured on real candles
+
+The ask was simple: one more mode, 3-minute, scalping only, use whatever
+indicators help, just make the result good.
+
+The honest answer took longer than the code. Everything above this section was
+measured on **synthetic random walks**, because no exchange API is reachable
+from this sandbox. A random walk has no volatility clustering, no session
+structure and no volume/price relationship — and a 3-minute scalping rule is a
+bet on exactly those things. Measuring it on noise tells you what noise does.
+
+### Real data, finally
+
+Binance's own API is blocked here, but a public archive of **real Binance spot
+1-minute klines** lives on GitHub (`parshant231234-eng/<SYMBOL>-Historical-Data`,
+one CSV per symbol per month). `tool/mirror/fetch_real_1m.py` downloads and caches
+it outside the repo (`/tmp/klines`, override with `KLINES_CACHE`), splitting any
+aggregate that spans a data gap instead of gluing over it.
+
+Sample used for every number below: **41 Binance pairs, Feb–Nov 2026**, three
+months of 3M candles per pair (~47 500 bars), aggregated from 1-minute.
+
+### Why every obvious 3M rule loses
+
+A 3-minute bar on a liquid pair has an ATR of **0.09%–0.35% of price** (median
+0.22%). The round trip costs **0.25%**. In R terms, cost is not a constant:
+
+    cost_R = 0.25 / stop_pct_as_percent
+
+so a 1.5×ATR stop is 0.15–0.5% wide and the **fee alone is 0.5R–1.7R per trade**.
+A fixed 2R target then needs a 50–73% win rate to break even. Measured on real
+candles, every 3M rule — momentum ignition, pullback, band reversion, with fixed
+targets or ATR trailing, 20- or 60-bar holds — landed at:
+
+| rule (unanchored) | n | WR | net/tr @0.25% | break-even fee f* |
+|---|---|---|---|---|
+| ignite, rr2, h20 | 34 880 | 39.3% | −0.42R | 0.026% |
+| pullback, rr3, h60 | 13 644 | 28.1% | −0.25R | 0.033% |
+| pullback, trail2, h60 | 15 689 | 36.2% | −0.21R | 0.036% |
+
+f* (the round-trip fee at which the rule is flat) of 0.02–0.04% means the rule
+**cannot pay a real fee at any setting**. That is not a tuning problem.
+
+### The one thing that works: the volatility gate
+
+If the fee is `0.25 / stop_pct`, the only lever that moves it is stop width — and
+stop width is set by how much the bar itself moves. So the mode refuses to trade
+unless **ATR(14) ≥ 0.80% of price on the 3M bar**. That is 2–9× a liquid pair's
+normal 3M ATR, i.e. it only fires on coins genuinely in play.
+
+Same candles, only the gate added, everything else identical:
+
+| gate | TRAIN n | TRAIN net@0.25% | TEST n | TEST net@0.25% | f* |
+|---|---|---|---|---|---|
+| 0.00 | 9 472 | −2381.3% | 11 504 | −2459.5% | 0.00% |
+| 0.40 | 2 579 | −583.8% | 3 870 | −519.6% | — |
+| 0.60 | 681 | −69.3% | 1 224 | +39.8% | — |
+| 0.70 | 379 | −6.6% | 764 | +99.2% | — |
+| **0.80** | **240** | **−1.5%** | **538** | **+147.5%** | **0.48%** |
+| 1.00 | 110 | −5.7% | 326 | +168.8% | — |
+| 1.30 | 40 | −55.4% | 185 | +120.9% | — |
+
+TRAIN = Feb–Jul 2026 (6 months), TEST = Aug–Nov 2026 (4 months), **disjoint**;
+nothing was tuned on TEST. Gross/net are percent of price, not R, because the fee
+is quoted in percent.
+
+Controls, because a positive number alone proves nothing:
+
+- **gated random entries, same stop/target/hold/gate**: −486.0% (train),
+  −715.3% (test). Same gate, same mechanics, entries by coin flip.
+- **stock of trades**: 538 trades over 39 symbols is ~14 per symbol in 4 months.
+
+### What the numbers do NOT support
+
+The two best coins carry the TEST sample:
+
+| | n | WR | net @0.25% |
+|---|---|---|---|
+| TEST, all 39 symbols | 538 | 36.4% | **+147.5%** |
+| TEST, without IOST + ONE | 373 | 35.4% | **−31.7%** |
+| TEST, IOST alone | 58 | 48.3% | +112.8% |
+| TEST, ONE alone | 107 | 33.6% | +66.4% |
+| TRAIN, all 22 symbols | 240 | 36.2% | −1.5% |
+| TRAIN, without top 2 | 200 | 35.0% | −29.7% |
+
+Positive on 19/39 symbols, **median symbol −0.6%**. So the release note says what
+is true: the rule beats random by roughly 0.9% of price per trade (that is the
+gate earning its keep), it was flat over six months and positive over the next
+four, and two coins account for all of the positive period. It is shipped as a
+mode with the fee printed on every card, not as a money machine.
+
+### The shipped rule
+
+`TradeMode.scalp3m`, 3M only, one series, its own engine (`Engine.scalp3m`) — it
+does **not** reuse the SMC scoring:
+
+    trend     EMA9 > EMA21 > EMA50                        (direction only)
+    entry     close < EMA21, RSI(14) 30–55, green bar      (mirror for sells)
+    gate      Wilder ATR(14) / price >= 0.80%             (fee filter)
+    stop      min(5-bar low, close − 1.5 × ATR), reject under 0.35%
+    target    3R, 60-bar (3-hour) time stop, one trade at a time
+
+Entry is always the decision bar's **close**, never a limit, so the v18.0 fill
+bug cannot recur in this mode. Every card prints `fee X.XXR on a Y.YY% stop`.
+
+The 3M tab also ranks its universe by movement (§30) and refreshes on the 3M
+boundary, because a 3M mode that rescans every 5 minutes is late by construction.
+
+### Tooling added
+
+| file | purpose |
+|---|---|
+| `fetch_real_1m.py` | download + cache real Binance 1m klines, gap-safe aggregation |
+| `mirror3m.py` | Python mirror of the 3M rules (Wilder ATR, causal Series) |
+| `measure_3m_scalp.py` | first pass on synthetic data — kept, and it is why the real-data run exists |
+| `measure_real_3m.py` | rules vs random control on real candles |
+| `measure_real_3m_exits.py` | exit structures × holds × volatility gates |
+| `measure_real_3m_fee.py` | solves for f*, the break-even fee |
+| `measure_real_3m_gate.py` | out-of-sample + gated control + per-symbol |
+| `report_3m_scalp.py` | the shipped config, with the two-coin concentration check |
+| `test_3m_scalp.py` | pins the Dart constants to the measured ones |
+| `test_3m_parity.py` | Dart logic vs Python mirror, bar for bar on real candles |
+
+`test_3m_parity.py` matters more than it looks. The mirror and the Dart engine
+had already drifted twice — the mirror prepended one `None` too many, making
+every indicator a bar stale (causal, but a different rule), and it used a simple
+ATR where Dart used Wilder. A measurement of a different rule is not evidence, so
+the parity test now compares 36 360 real bars and requires identical decisions,
+stops and targets.
+
+CI runs `test_3m_scalp.py`, which skips the data-dependent checks when the kline
+cache is absent (GitHub CI does not have 200 MB of CSV) and says so in the log
+rather than passing silently.

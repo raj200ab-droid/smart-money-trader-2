@@ -38,16 +38,23 @@ def main():
     check('chop carried on the signal',
           'final double chop;' in src and 'this.chop = 0,' in src)
 
-    check('sort uses chop in single3m only',
-          'if (a.mode == TradeMode.single3m) {' in src
+    # v18.2 widened this: both 3M modes order by movement, and swing/scalp
+    # still order by confidence. The pin is the SET, not the string.
+    check('sort uses chop in the 3M modes only',
+          'if (a.mode == TradeMode.single3m || a.mode == TradeMode.scalp3m) {' in src
+          and 'if (a.mode == TradeMode.swing' not in src
           and 'final c = b.chop.compareTo(a.chop);' in src,
           'swing/scalp keep confidence ordering')
 
     check('confidence still the final tiebreak',
           'return b.confidence.compareTo(a.confidence);' in src)
 
-    check('quiet coins collected only in single3m',
-          'if (sig == null && _mode == TradeMode.single3m' in src)
+    # single3m collects them in the SMC path; scalp3m collects them in its own
+    # branch. Both cap and sort the list the same way.
+    check('quiet coins collected in single3m',
+          'if (sig == null &&' in src and '_mode == TradeMode.single3m' in src)
+    check('quiet coins collected in scalp3m',
+          'quiet3 = _Quiet(sym, px3 > 0 ? a3 / px3 * 100 : 0, tr);' in src)
 
     check('quiet coins rendered below the signals',
           '_quietHeader()' in src and '_quietRow' in src

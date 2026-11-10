@@ -21,7 +21,7 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v18.1 · 3M by movement';
+const String kBuild = 'v18.2 · 3M scalp (fee gate)';
 
 /// App version reported in the UI so an installed build is identifiable.
 ///
@@ -30,7 +30,7 @@ const String kBuild = 'v18.1 · 3M by movement';
 /// an APK named `...-17.0.0-20.apk` while the code was `17.1.0+21`. The release
 /// workflow now reads pubspec.yaml directly and `test_stamps` fails the build
 /// if this line drifts again.
-const String kVersionName = '18.1.0+26';
+const String kVersionName = '18.2.0+27';
 
 
 /// How the three timeframes are stacked.
@@ -43,30 +43,44 @@ const String kVersionName = '18.1.0+26';
 enum TradeMode {
   swing,
   scalp,
-  single3m;
+  single3m,
+  scalp3m;
 
   /// Timeframe that provides the bias.
   String get biasTf {
     if (this == TradeMode.swing) return '4H';
-    return this == TradeMode.scalp ? '30M' : '3M';
+    if (this == TradeMode.scalp) return '30M';
+    return '3M';
   }
 
   /// Timeframe that provides the order blocks, FVGs and premium/discount.
   String get zoneTf {
     if (this == TradeMode.swing) return '1H';
-    return this == TradeMode.scalp ? '15M' : '3M';
+    if (this == TradeMode.scalp) return '15M';
+    return '3M';
   }
 
   /// Timeframe that provides the live break trigger.
   String get triggerTf {
     if (this == TradeMode.swing) return '15M';
-    return this == TradeMode.scalp ? '5M' : '3M';
+    if (this == TradeMode.scalp) return '5M';
+    return '3M';
   }
 
   String get label {
     if (this == TradeMode.swing) return 'Swing';
-    return this == TradeMode.scalp ? 'Scalp' : '3M';
+    if (this == TradeMode.scalp) return 'Scalp';
+    return this == TradeMode.single3m ? '3M' : '3M S';
   }
+
+  /// True for the dedicated 3-minute scalping rules.
+  ///
+  /// This is NOT the same thing as [single3m]. `single3m` runs the swing engine
+  /// with the 3M series fed into all three slots, which double counts one
+  /// structure break as bias, zone and trigger. `scalp3m` uses its own rule
+  /// set (`Engine.scalp3m`) built from three independent readings, and it
+  /// lives and dies by one measured number: the ATR% gate.
+  bool get isScalp3m => this == TradeMode.scalp3m;
 
   /// True when all three slots read the SAME series.
   ///
@@ -2727,6 +2741,204 @@ class Engine {
     return null;
   }
 
+  // -------------------------------------------------------------------
+  // 3M SCALP  (TradeMode.scalp3m)
+  // -------------------------------------------------------------------
+  //
+  // Why this is not `multiTF` with 3M candles in every slot.
+  //
+  // `single3m` feeds one 3M series into bias, zone and trigger. One structure
+  // break then scores +30 (bias) +25 (OB) +20 (trigger) and clears the 60 gate
+  // alone. Measured on real Binance 1-minute candles (Aug-Nov 2026, 41 pairs),
+  // every 3M variant of that engine is flat-to-negative after fees.
+  //
+  // These rules ask three questions that CANNOT be answered by the same event:
+  //   trend   EMA9 > EMA21 > EMA50                 (direction only)
+  //   entry   close < EMA21 and RSI 30-55 and a green bar   (is this a price?)
+  //   gate    ATR(14) as % of price >= 0.80        (can the fee be paid?)
+  //
+  // The gate is the whole model, not a filter bolted on. The round trip costs
+  // 0.25% of price; expressed in R it is `0.25 / stop_pct`. On a liquid pair a
+  // 3M ATR is 0.1-0.35%, so a 1.5xATR stop is 0.15-0.5% wide and the fee alone
+  // is 0.5R-1.7R per trade. Requiring the bar itself to be moving 0.8%+ only
+  // approves trades whose stop is wide enough to absorb the fee.
+  //
+  // Measured, real candles, 0.25% round trip, charged per trade:
+  //
+  //   every 3M rule without the gate      f* = 0.02-0.04%  (dead at any fee)
+  //   this rule, gate 0.50                f* = 0.17%
+  //   this rule, gate 0.80                f* = 0.48%       (alive)
+  //
+  // Out-of-sample walk (train Feb-Jul, test Aug-Nov, nothing tuned on test):
+  //   TEST   538 trades  WR 36.4%  net +147.5%
+  //   TEST without the two biggest symbols   net  -31.7%
+  //   TRAIN 240 trades  WR 36.2%  net  -1.5%   (six months, flat)
+  //   same gate, random entries  TEST net -715.3%
+  //
+  // So: the rule beats random by ~0.9% per trade, which is the gate earning its
+  // keep, but it is NOT reliably profitable -- remove two coins and the sample
+  // goes negative. The card says so; the mode is shipped as a research tool
+  // with a visible, honest fee line, not as a promise.
+  // -------------------------------------------------------------------
+
+  /// Minimum ATR(14) as a percentage of price for a 3M scalp to be allowed.
+  /// Measured break-even fee at this gate was 0.48% round trip; below 0.5 the
+  /// model stops paying for itself at the 0.25% the app assumes.
+  static const double scalp3mGate = 0.80;
+
+  /// Reject stops narrower than this (percent of price). 0.25% fee on a 0.2%
+  /// stop is 1.25R of cost before the trade moves.
+  static const double scalp3mMinStop = 0.35;
+
+  /// Fixed reward:risk for the 3M scalp. 3R measured better than 2R at this
+  /// gate because the gate selects bars that can still travel.
+  static const double scalp3mRR = 3.0;
+
+  /// Wilder RSI(14) aligned to the tail of [closes], newest value last.
+  static List<double> rsi(List<double> closes, [int period = 14]) {
+    if (closes.length <= period) return <double>[];
+    var gains = 0.0, losses = 0.0;
+    for (var i = 1; i <= period; i++) {
+      final d = closes[i] - closes[i - 1];
+      if (d > 0) {
+        gains += d;
+      } else {
+        losses -= d;
+      }
+    }
+    var ag = gains / period, al = losses / period;
+    final out = <double>[
+      al == 0 ? 100.0 : 100 - 100 / (1 + ag / al),
+    ];
+    for (var i = period + 1; i < closes.length; i++) {
+      final d = closes[i] - closes[i - 1];
+      ag = (ag * (period - 1) + (d > 0 ? d : 0)) / period;
+      al = (al * (period - 1) + (d < 0 ? -d : 0)) / period;
+      out.add(al == 0 ? 100.0 : 100 - 100 / (1 + ag / al));
+    }
+    return out;
+  }
+
+  /// Wilder ATR(14) aligned so the LAST value belongs to the last bar.
+  ///
+  /// `atr()` above is the simple average of the last [period] true ranges,
+  /// which is what the SMC engine was always measured with and must not change.
+  /// The 3M scalp rules were measured with the Wilder form, so they use this
+  /// one: measurement and shipped code have to be the same function, or the
+  /// number in the release note describes code that is not on the phone.
+  static double atrWilder(List<Candle> c, {int period = 14}) {
+    if (c.length < period + 1) return 0;
+    final tr = <double>[
+      c[0].high - c[0].low,
+    ];
+    for (var i = 1; i < c.length; i++) {
+      tr.add(max(
+        c[i].high - c[i].low,
+        max((c[i].high - c[i - 1].close).abs(), (c[i].low - c[i - 1].close).abs()),
+      ));
+    }
+    var v = 0.0;
+    for (var i = 1; i <= period; i++) {
+      v += tr[i];
+    }
+    v /= period;
+    for (var i = period + 1; i < tr.length; i++) {
+      v = (v * (period - 1) + tr[i]) / period;
+    }
+    return v;
+  }
+
+  /// The 3M scalp decision at the close of the last bar of [c3].
+  ///
+  /// One series only, so every reading uses candles the live chart also had at
+  /// that close. Entry is that close -- never a limit price -- because the v18.0
+  /// fill bug came from booking entries the market never traded.
+  static TradeSignal? scalp3m(String sym, List<Candle> c3) {
+    if (c3.length < 60) return null;
+    final px = c3.last.close;
+    if (px <= 0) return null;
+
+    final a14 = atrWilder(c3, period: 14);
+    if (a14 <= 0) return null;
+    final atrPct = a14 / px * 100;
+    if (atrPct < scalp3mGate) return null;
+
+    final closes = <double>[for (final k in c3) k.close];
+    final e9 = ema(closes, 9);
+    final e21 = ema(closes, 21);
+    final e50 = ema(closes, 50);
+    final r = rsi(closes, 14);
+    if (e50.isEmpty || r.isEmpty) return null;
+    final e9n = e9.last, e21n = e21.last, e50n = e50.last, rn = r.last;
+    final bar = c3.last;
+
+    final up = e9n > e21n && e21n > e50n;
+    final dn = e9n < e21n && e21n < e50n;
+    if (!up && !dn) return null;
+
+    final stop5Buy = <double>[for (final k in c3.sublist(c3.length - 5)) k.low]
+        .reduce((x, y) => x < y ? x : y);
+    final stop5Sell = <double>[for (final k in c3.sublist(c3.length - 5)) k.high]
+        .reduce((x, y) => x > y ? x : y);
+
+    bool buy;
+    if (up && px < e21n && rn >= 30 && rn <= 55 && bar.close > bar.open) {
+      buy = true;
+    } else if (dn &&
+        px > e21n &&
+        rn >= 45 &&
+        rn <= 70 &&
+        bar.close < bar.open) {
+      buy = false;
+    } else {
+      return null;
+    }
+
+    final sl = buy
+        ? (stop5Buy < px - a14 * 1.5 ? stop5Buy : px - a14 * 1.5)
+        : (stop5Sell > px + a14 * 1.5 ? stop5Sell : px + a14 * 1.5);
+    final risk = (sl - px).abs();
+    if (risk <= 0) return null;
+    final stopPct = risk / px * 100;
+    if (stopPct < scalp3mMinStop || stopPct > 8) return null;
+    final tp = buy ? px + risk * scalp3mRR : px - risk * scalp3mRR;
+
+    // The fee in R, printed on the card: 0.25% round trip over the stop width.
+    final feeR = kCostPct / stopPct;
+
+    return TradeSignal(
+      symbol: sym,
+      direction: buy ? 'BUY' : 'SELL',
+      price: px,
+      entry: px,
+      sl: sl,
+      tp: tp,
+      // Not a probability and not a score out of 100. The 3M scalp has no
+      // confluence stack to count, so the only number that separates two
+      // signals is the fee: at a 0.12R fee this reads ~93, at 0.6R it reads ~64,
+      // and the sort order (movement first) is what actually decides the list.
+      confidence: (100 - feeR * 60).clamp(30.0, 100.0).toDouble(),
+      chop: atrPct,
+      confirmations: <String>[
+        '3M EMA stack ${buy ? 'bullish' : 'bearish'} (9/21/50)',
+        'pullback: price ${buy ? 'below' : 'above'} EMA21, RSI ${rn.toStringAsFixed(0)}',
+        'ATR ${atrPct.toStringAsFixed(2)}%/bar >= ${scalp3mGate.toStringAsFixed(2)}% gate',
+        'fee ${feeR.toStringAsFixed(2)}R on a ${stopPct.toStringAsFixed(2)}% stop',
+      ],
+      time: DateTime.now(),
+      tf4h: buy ? 'BULL' : 'BEAR',
+      tf1h: 'PULLBACK',
+      tf15m: 'RSI ${rn.toStringAsFixed(0)}',
+      pattern: 'PULLBACK',
+      zone: buy ? 'Discount' : 'Premium',
+      eqh: false,
+      eql: false,
+      watch: false,
+      tier: 'SCALP',
+      mode: TradeMode.scalp3m,
+    );
+  }
+
   /// Fallback candidate: the higher timeframe has a direction and the 15M has
   /// a live break, but the zone or the score is still missing. Strict SMC
   /// says do not trade this; it is still the honest answer to "what is the
@@ -3209,7 +3421,7 @@ class _HS extends State<HomeScreen> {
   void _restartTimer() {
     _timer?.cancel();
     _timer = Timer.periodic(
-      _mode.isSingleTimeframe
+      _mode.isSingleTimeframe || _mode.isScalp3m
           ? const Duration(minutes: 3)
           : const Duration(minutes: 5),
       (_) {
@@ -3254,7 +3466,8 @@ class _HS extends State<HomeScreen> {
         losers: MarketData.scanTarget ~/ 2,
         // 3M ranks the universe by how much each coin actually moves, so the
         // 400 slots go to markets a 3-minute hold can work.
-        byVolatility: _mode == TradeMode.single3m,
+        byVolatility:
+            _mode == TradeMode.single3m || _mode == TradeMode.scalp3m,
       );
       if (id != _scanId || !mounted) return;
 
@@ -3321,7 +3534,7 @@ class _HS extends State<HomeScreen> {
           // not tradeable at the same size and its target is inside the fee.
           // Other modes keep confidence as the tiebreak so their ordering does
           // not change.
-          if (a.mode == TradeMode.single3m) {
+          if (a.mode == TradeMode.single3m || a.mode == TradeMode.scalp3m) {
             final c = b.chop.compareTo(a.chop);
             if (c != 0) return c;
           }
@@ -3362,7 +3575,9 @@ class _HS extends State<HomeScreen> {
             final List<Candle> c15;
             final List<Candle> c4;
             final List<Candle> c1;
-            if (_mode.isSingleTimeframe) {
+            if (_mode.isSingleTimeframe || _mode.isScalp3m) {
+              // One 3M series. `scalp3m` reads trend, pullback and volatility
+              // from the same candles by design (see Engine.scalp3m).
               c15 = await MarketData.candles(sym, trigTf, 500, scan: true);
               c4 = c15;
               c1 = c15;
@@ -3377,7 +3592,14 @@ class _HS extends State<HomeScreen> {
 
             // A delisted pair still serves history. Reject it here instead of
             // scoring year-old candles as if they were today's.
-            if (!MarketData.isLive(c15, '15m') ||
+            // One series in the single-timeframe modes: check it once with the
+            // tight bar age, not with the 4H/1H slacks.
+            if (_mode.isSingleTimeframe || _mode.isScalp3m) {
+              if (!MarketData.isLive(c15, '15m')) {
+                if (mounted) setState(() => _delisted++);
+                return;
+              }
+            } else if (!MarketData.isLive(c15, '15m') ||
                 !MarketData.isLive(c4, '4h') ||
                 !MarketData.isLive(c1, '1h')) {
               if (mounted) setState(() => _delisted++);
@@ -3406,12 +3628,39 @@ class _HS extends State<HomeScreen> {
             // exactly where young listings live.
             if (c4.length < 60) {
               if (mounted) setState(() => _tooYoung++);
+            } else if (_mode.isScalp3m) {
+              // Own path: no SMC scoring, no radar, no bias analysis.
+              var sig3 = Engine.scalp3m(sym, w15);
+              if (sig3 != null &&
+                  coins[i].quoteVolume <= MarketData.preferredVolume) {
+                sig3 = sig3.asThin();
+              }
+              _Quiet? quiet3;
+              if (sig3 == null && w15.length > 20) {
+                final px3 = w15.last.close;
+                final a3 = Engine.atr(w15, period: 14);
+                final cl = <double>[for (final k in w15) k.close];
+                final e9 = Engine.ema(cl, 9);
+                final e21 = Engine.ema(cl, 21);
+                final e50 = Engine.ema(cl, 50);
+                String tr = 'flat';
+                if (e50.isNotEmpty) {
+                  if (e9.last > e21.last && e21.last > e50.last) {
+                    tr = 'bull';
+                  } else if (e9.last < e21.last && e21.last < e50.last) {
+                    tr = 'bear';
+                  }
+                }
+                quiet3 = _Quiet(sym, px3 > 0 ? a3 / px3 * 100 : 0, tr);
+              }
+              _scratch[i] = _CoinOut(sig3, null, quiet3);
             } else {
               if (c4.length < 120 && mounted) setState(() => _short4h++);
               final bias = Engine.analyze(biasTf.toUpperCase(), w4);
 
               // Strict SMC confluence first; fall back to the relaxed pass so
               // the list is not empty in quiet markets (flagged WATCH).
+              // (scalp3m never reaches here -- it has its own branch above.)
               var sig = Engine.multiTF(sym, w4, w1, w15,
                   c4Long: c4, c1Long: c1, mode: _mode);
               sig ??= Engine.multiTF(sym, w4, w1, w15,
@@ -3449,7 +3698,9 @@ class _HS extends State<HomeScreen> {
               // the quiet coins rather than hide them, and it also stops "no
               // setup" from being indistinguishable from "never scanned".
               _Quiet? quiet;
-              if (sig == null && _mode == TradeMode.single3m && w15.length > 20) {
+              if (sig == null &&
+                  _mode == TradeMode.single3m &&
+                  w15.length > 20) {
                 final pxNow = w15.last.close;
                 final a = Engine.atr(w15, period: 14);
                 quiet = _Quiet(
@@ -3831,15 +4082,22 @@ class _HS extends State<HomeScreen> {
             const Divider(color: K.line, height: 1),
             const SizedBox(height: 10),
             Text(
-              '${_quiets.length} coin-e setup nei '
-              '(beshi move kora age)',
+              _mode.isScalp3m
+                  ? '${_quiets.length} coin gate-e atke nai '
+                      '(beshi move kora age)'
+                  : '${_quiets.length} coin-e setup nei '
+                      '(beshi move kora age)',
               style: const TextStyle(
                   color: K.text, fontSize: 12, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 3),
             Text(
-              'Egulo analyse kora hoise but kono setup pay nai. '
-              'Kom move korche, tai niche.',
+              _mode.isScalp3m
+                  ? 'Egulo analyse kora hoise but 3M scalp rule pay nai. '
+                      'ATR ${Engine.scalp3mGate.toStringAsFixed(2)}%-er kom '
+                      'hole fee uthano jay na, tai skip.'
+                  : 'Egulo analyse kora hoise but kono setup pay nai. '
+                      'Kom move korche, tai niche.',
               style: const TextStyle(color: K.muted, fontSize: 10, height: 1.4),
             ),
           ],
@@ -3919,14 +4177,25 @@ class _HS extends State<HomeScreen> {
               ),
             ),
             const SizedBox(height: 6),
-            const Center(
+            Center(
               child: Padding(
-                padding: EdgeInsets.symmetric(horizontal: 34),
+                padding: const EdgeInsets.symmetric(horizontal: 34),
                 child: Text(
-                  'Strict SMC setup (bias + OB/FVG zone + trigger) '
-                  'ekhon nei. Niche dekho kon coin koto duro eshechilo.',
+                  _mode.isScalp3m
+                      // The 3M scalp refuses almost everything on purpose.
+                      // Saying so is the difference between a broken screen and
+                      // an honest one: on a quiet market every coin fails the
+                      // ATR% gate, and there is no trade to give.
+                      ? '3M scalp ekta kothin filter: bar-er ATR '
+                          '${Engine.scalp3mGate.toStringAsFixed(2)}%-er niche hole '
+                          'kono signal nai (fee ${kCostPct.toStringAsFixed(2)}% '
+                          'tule ney). Ekhon market quiet — niche dekho kon coin '
+                          'koto kachakachi chilo.'
+                      : 'Strict SMC setup (bias + OB/FVG zone + trigger) '
+                          'ekhon nei. Niche dekho kon coin koto duro eshechilo.',
                   textAlign: TextAlign.center,
-                  style: TextStyle(color: K.muted, fontSize: 12, height: 1.4),
+                  style: const TextStyle(
+                      color: K.muted, fontSize: 12, height: 1.4),
                 ),
               ),
             ),
@@ -4319,7 +4588,7 @@ class _SignalCard extends StatelessWidget {
                               // by. A coin at 0.1%/bar cannot pay a 0.25% fee
                               // on a 3M hold, and the card should say so rather
                               // than leave the ordering unexplained.
-                              '${signal.mode == TradeMode.single3m ? ' • ${signal.chop.toStringAsFixed(2)}%/bar' : ''}',
+                              '${signal.mode == TradeMode.single3m || signal.mode == TradeMode.scalp3m ? ' • ${signal.chop.toStringAsFixed(2)}%/bar' : ''}',
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(color: color, fontSize: 10),
                             ),
