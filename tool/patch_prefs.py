@@ -82,12 +82,23 @@ class GeminiPrefs(private val context: Context) : MethodChannel.MethodCallHandle
 
 
 def find_main_activity(root: pathlib.Path):
-    """Locate the MainActivity that `flutter create` generated for this app."""
-    for p in root.rglob("MainActivity.kt"):
-        return p
-    for p in root.rglob("MainActivity.java"):
-        return p
-    return None
+    """Locate the MainActivity that `flutter create` generated for this app.
+
+    Searches the whole repository, not just android/: the path depends on the
+    Flutter version (kotlin/ vs java/ source sets both occur) and a wrong guess
+    fails the build two minutes later with an unhelpful message.
+    """
+    hits = sorted(root.rglob("MainActivity.kt")) + sorted(root.rglob("MainActivity.java"))
+    return hits[0] if hits else None
+
+
+def describe_tree(root: pathlib.Path) -> str:
+    """Print the files the patch cares about, so a failure explains itself."""
+    lines = [f"searching from: {root.resolve()}"]
+    for pat in ("**/MainActivity.*", "**/AndroidManifest.xml", "**/build.gradle*"):
+        found = sorted(str(p) for p in root.rglob(pat.replace("**/", "")))
+        lines.append(f"  {pat}: {len(found)} -> {found[:6]}")
+    return "\n".join(lines)
 
 
 def patch_main_activity(path: pathlib.Path) -> bool:
@@ -170,6 +181,7 @@ def patch_main_activity(path: pathlib.Path) -> bool:
     if text.count("{") != text.count("}"):
         print(f"error: unbalanced braces after patch ({text.count('{')} open, "
               f"{text.count('}')} close)", file=sys.stderr)
+        print(text, file=sys.stderr)
         return False
     path.write_text(text, encoding="utf-8")
     print("installed prefs channel in", path)
@@ -177,17 +189,25 @@ def patch_main_activity(path: pathlib.Path) -> bool:
 
 
 def main() -> int:
-    root = pathlib.Path("android")
-    if not root.is_dir():
+    root = pathlib.Path(".")
+    if not pathlib.Path("android").is_dir():
         print("error: android/ not found -- run after flutter create", file=sys.stderr)
         return 1
     act = find_main_activity(root)
     if act is None:
-        print("error: no MainActivity found", file=sys.stderr)
+        print("error: no MainActivity found anywhere in the tree", file=sys.stderr)
+        print(describe_tree(root), file=sys.stderr)
         return 1
-    pkg = act.parent.as_posix().split("java/")[-1].replace("/", ".")
+    # Package directory is whatever follows the last source root.
+    parent = act.parent.as_posix()
+    for marker in ("/kotlin/", "/java/"):
+        if marker in parent:
+            parent = parent.split(marker, 1)[1]
+            break
+    pkg = parent.replace("/", ".")
     prefs = act.parent / "GeminiPrefs.kt"
     prefs.write_text(PREFS_KT.format(pkg=pkg), encoding="utf-8")
+    print(f"package: {pkg}")
     print("wrote", prefs)
 
     if not patch_main_activity(act):
