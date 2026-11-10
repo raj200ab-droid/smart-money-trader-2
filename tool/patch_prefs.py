@@ -101,81 +101,97 @@ def describe_tree(root: pathlib.Path) -> str:
     return "\n".join(lines)
 
 
+KOTLIN_OVERRIDE = """
+    /** Device storage for the Gemini key. See tool/patch_prefs.py. */
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "__CHANNEL__"
+        ).setMethodCallHandler(GeminiPrefs(applicationContext))
+    }
+"""
+
+JAVA_OVERRIDE = """
+    /** Device storage for the Gemini key. See tool/patch_prefs.py. */
+    @Override
+    public void configureFlutterEngine(@NonNull FlutterEngine flutterEngine) {
+        super.configureFlutterEngine(flutterEngine);
+        new MethodChannel(
+            flutterEngine.getDartExecutor().getBinaryMessenger(),
+            "__CHANNEL__"
+        ).setMethodCallHandler(new GeminiPrefs(getApplicationContext()));
+    }
+"""
+
+
+def _add_import(text: str, imp: str) -> str:
+    """Add an import once, keeping Kotlin/Java import lists together."""
+    if imp in text:
+        return text
+    last = None
+    for last in re.finditer(r"^import .*$", text, re.M):
+        pass
+    if last is not None:
+        return text[: last.end()] + "\n" + imp + text[last.end():]
+    m = re.search(r"^package .*$", text, re.M)
+    if m:
+        return text[: m.end()] + "\n\n" + imp + text[m.end():]
+    return imp + "\n\n" + text
+
+
 def patch_main_activity(path: pathlib.Path) -> bool:
-    """Install the channel in onCreate. Returns True when it was added."""
+    """Install the channel, whatever shape `flutter create` produced.
+
+    The templates differ across Flutter versions in ways that matter:
+    `class MainActivity : FlutterActivity()` has no body, while 3.16 emits
+    `class MainActivity: FlutterActivity() {` -- no space, body present. An
+    earlier version assumed the first form and appended a closing brace to the
+    second, producing Kotlin that would not compile. So this matches the class
+    declaration with a regex and inserts INTO the body when one exists.
+    """
     text = path.read_text(encoding="utf-8")
     if CHANNEL in text:
         print("channel already installed in", path)
-        return False
-    pkg = f"{ORG}.{APP}"
+        return True  # idempotent: already correct is a success
+
     if path.suffix == ".kt":
-        if "onCreate" in text:
-            # Insert the call at the top of the existing onCreate body.
-            text = re.sub(
-                r"(override fun onCreate\(savedInstanceState: Bundle\?\)\s*\{)",
-                r"\1\n        installGeminiPrefs()",
-                text,
-                count=1,
-            )
-        else:
-            # `class MainActivity : FlutterActivity()` has an EMPTY body. Adding
-            # onCreate inside it means opening a new block, so the original
-            # statement has to become `FlutterActivity() {` and a closing brace
-            # has to balance it. Getting this wrong produces Kotlin that the
-            # build rejects, so the brace count is checked below.
-            text = text.replace(
-                "class MainActivity : FlutterActivity()",
-                "class MainActivity : FlutterActivity() {\n"
-                "    override fun onCreate(savedInstanceState: Bundle?) {\n"
-                "        super.onCreate(savedInstanceState)\n"
-                "        installGeminiPrefs()\n"
-                "    }\n",
-                1,
-            )
-            text = text.rstrip() + "\n}\n"
-        # imports
-        for imp in (
-            "import android.os.Bundle",
-            "import io.flutter.plugin.common.MethodChannel",
-        ):
-            if imp not in text:
-                text = text.replace("import io.flutter.embedding.android.FlutterActivity",
-                                    imp + "\nimport io.flutter.embedding.android.FlutterActivity",
-                                    1)
-        helper = (
-            "\n    /** Device storage for the Gemini key. See tool/patch_prefs.py. */\n"
-            "    private fun installGeminiPrefs() {\n"
-            f'        MethodChannel(flutterEngine!!.dartExecutor.binaryMessenger,\n'
-            f'            "{CHANNEL}")\n'
-            "            .setMethodCallHandler(GeminiPrefs(applicationContext))\n"
-            "    }\n"
-        )
-        # put the helper inside the class: before the final closing brace
-        idx = text.rstrip().rfind("}")
-        text = text[:idx] + helper + text[idx:]
-    else:
-        # Java fallback: keep it simple and correct rather than clever.
-        if "onCreate" in text:
-            text = text.replace(
-                "protected void onCreate(Bundle savedInstanceState) {",
-                "protected void onCreate(Bundle savedInstanceState) {\n"
-                "        installGeminiPrefs();",
-                1,
-            )
-        else:
-            print("error: generated MainActivity.java has no onCreate to patch",
-                  file=sys.stderr)
+        pat = re.compile(r"class\s+MainActivity\s*:\s*FlutterActivity\s*\(\s*\)\s*(\{)?")
+        m = pat.search(text)
+        if not m:
+            print("::error title=prefs::MainActivity.kt does not look like the "
+                  "FlutterActivity template", file=sys.stderr)
+            print(text, file=sys.stderr)
             return False
-        helper = (
-            "\n    private void installGeminiPrefs() {\n"
-            "        new io.flutter.plugin.common.MethodChannel(\n"
-            "            getFlutterEngine().getDartExecutor().getBinaryMessenger(),\n"
-            f'            "{CHANNEL}")\n'
-            "            .setMethodCallHandler(new GeminiPrefs(getApplicationContext()));\n"
-            "    }\n"
-        )
-        idx = text.rstrip().rfind("}")
-        text = text[:idx] + helper + text[idx:]
+        body = KOTLIN_OVERRIDE.replace("__CHANNEL__", CHANNEL)
+        if m.group(1):
+            # body already open: insert immediately after the brace
+            text = text[: m.end()] + body + text[m.end():]
+        else:
+            text = text[: m.start()] + (
+                "class MainActivity : FlutterActivity() {" + body + "}"
+            ) + text[m.end():]
+        text = _add_import(text, "import io.flutter.embedding.engine.FlutterEngine")
+        text = _add_import(text, "import io.flutter.plugin.common.MethodChannel")
+    else:
+        pat = re.compile(r"class\s+MainActivity\s+extends\s+FlutterActivity\s*(\{)?")
+        m = pat.search(text)
+        if not m:
+            print("::error title=prefs::MainActivity.java does not look like the "
+                  "FlutterActivity template", file=sys.stderr)
+            print(text, file=sys.stderr)
+            return False
+        body = JAVA_OVERRIDE.replace("__CHANNEL__", CHANNEL)
+        if m.group(1):
+            text = text[: m.end()] + body + text[m.end():]
+        else:
+            text = text[: m.start()] + (
+                "class MainActivity extends FlutterActivity {" + body + "}"
+            ) + text[m.end():]
+        text = _add_import(text, "import io.flutter.embedding.engine.FlutterEngine")
+        text = _add_import(text, "import io.flutter.plugin.common.MethodChannel")
+        text = _add_import(text, "import androidx.annotation.NonNull")
+
     # A missing brace in generated Kotlin is a build failure 2 minutes later
     # with an unhelpful message, so fail here with a useful one.
     if text.count("{") != text.count("}"):
@@ -183,6 +199,8 @@ def patch_main_activity(path: pathlib.Path) -> bool:
               f"{text.count('}')} close)")
         print(text, file=sys.stderr)
         return False
+    if not text.endswith("\n"):
+        text += "\n"
     path.write_text(text, encoding="utf-8")
     print("installed prefs channel in", path)
     return True

@@ -135,6 +135,54 @@ def main():
           'com.smartmoney.smart_money_trader/prefs' in patch
           and 'com.smartmoney.smart_money_trader/prefs' in gem_src)
 
+    # ---------------------------------------- 8. the kotlin patch, on real shapes
+    print('8. patch_prefs produces valid Kotlin for both flutter-create templates')
+    import shutil
+    import subprocess
+    import tempfile
+
+    templates = {
+        # Flutter 3.16 emits this one -- no space before the colon, body present.
+        '3.16 body': ('package com.smartmoney.smart_money_trader\n\n'
+                      'import io.flutter.embedding.android.FlutterActivity\n\n'
+                      'class MainActivity: FlutterActivity() {\n}\n'),
+        # older templates have no body at all
+        'no body': ('package com.smartmoney.smart_money_trader\n\n'
+                    'import io.flutter.embedding.android.FlutterActivity\n\n'
+                    'class MainActivity : FlutterActivity()\n'),
+    }
+    script = os.path.join(ROOT, 'tool', 'patch_prefs.py')
+    for label, src in templates.items():
+        d = tempfile.mkdtemp()
+        try:
+            kt = os.path.join(d, 'android', 'app', 'src', 'main', 'kotlin',
+                              'com', 'smartmoney', 'smart_money_trader')
+            os.makedirs(kt)
+            path = os.path.join(kt, 'MainActivity.kt')
+            open(path, 'w').write(src)
+            r = subprocess.run([sys.executable, script], cwd=d,
+                               capture_output=True, text=True)
+            out = open(path).read() if os.path.exists(path) else ''
+            check(f'{label}: patch exits 0', r.returncode == 0,
+                  (r.stderr or '')[-300:])
+            check(f'{label}: channel installed',
+                  'com.smartmoney.smart_money_trader/prefs' in out)
+            check(f'{label}: braces stay balanced', out.count('{') == out.count('}'),
+                  f"{out.count('{')} vs {out.count('}')}")
+            check(f'{label}: handler class written',
+                  os.path.exists(os.path.join(kt, 'GeminiPrefs.kt')))
+            # Second run must be a no-op success, because CI re-runs on retries.
+            r2 = subprocess.run([sys.executable, script], cwd=d,
+                                capture_output=True, text=True)
+            check(f'{label}: re-run is idempotent', r2.returncode == 0,
+                  (r2.stderr or '')[-300:])
+            # super.configureFlutterEngine(...) also matches the bare name, so
+            # count the declaration, not the word.
+            check(f'{label}: re-run does not duplicate the override',
+                  open(path).read().count('override fun configureFlutterEngine') == 1)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
     print()
     if fails:
         print(f'{len(fails)} FAILED: {fails}')
