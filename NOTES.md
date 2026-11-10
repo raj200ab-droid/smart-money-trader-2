@@ -1269,3 +1269,7 @@ refusal report and labels the per-floor totals as non-comparable.
 
 Verification: tree-sitter 0 errors, `test_stamps` PASS, `test_mirror` PASS
 (now also pins kMinStopPct against mirror.MIN_STOP_PCT), `test_universe` PASS.
+
+Released as tag `v17.4.0` (commit `eb8f6a2`, CI `42836179617` success, release
+run `42836565787` success). Asset
+`smart-money-trader-v17.4-real-stops-17.4.0-24.apk`, 20.6 MB, link returns 302.
