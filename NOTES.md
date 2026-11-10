@@ -1273,3 +1273,101 @@ Verification: tree-sitter 0 errors, `test_stamps` PASS, `test_mirror` PASS
 Released as tag `v17.4.0` (commit `eb8f6a2`, CI `42836179617` success, release
 run `42836565787` success). Asset
 `smart-money-trader-v17.4-real-stops-17.4.0-24.apk`, 20.6 MB, link returns 302.
+
+## 29. v18.0 — single-timeframe 3M, MACD buy-only, and a backtest bug that invalidated the numbers
+
+Two features were asked for:
+
+1. a mode that analyses **only 3M candles** and fires as the candle closes;
+2. a **MACD buy-only** option on 3M.
+
+Both are shipped. The path there found a defect in the measuring harness that is
+more important than either feature.
+
+### The backtest booked impossible fills
+
+`walk()` sets `entry = orderBlock.midpoint` when the block is within 2% of price
+— a LIMIT order away from the market — and then filled it on the next bar
+unconditionally, scanning for the stop/target from there.
+
+Measured on single-3M: **71 of 84 trades entered at a price their own decision
+bar never traded.** A BUY could enter *below the session low* and then be booked
+as a win. That is why the first honest-looking run reported:
+
+| | n | WR | gross | net |
+|---|---|---|---|---|
+| before the fix | 3353 | 41.4% | **+906.5R** | +197.2R |
+
+A +906R gross edge on a synthetic random walk is not an edge, it is a bug —
+random walks have zero expectancy by construction. After modelling the limit
+properly (a fill only counts if price returns to the level within 5 bars;
+otherwise the setup is missed) the same mode reads:
+
+| | n | WR | gross | net | R/trade |
+|---|---|---|---|---|---|
+| single3M (fixed) | 2271 | 33.7% | +105.2R | −259.9R | +0.046 |
+| scalp | 1295 | 32.3% | +80.2R | −68.5R | +0.062 |
+| swing | 89 | 38.2% | +25.7R | +17.3R | +0.289 |
+
+**Every measurement in NOTES §20–§28 was produced by the old harness.** The
+swing/scalp figures there share the same optimistic fills and should be read as
+upper bounds. The *direction* of previous conclusions is unlikely to change
+(honest fills make results worse, and the conclusions were already negative),
+but the paragraph above is the number that matters now.
+
+This was found because a good result looked wrong. It should have been checked
+the first time a positive number appeared.
+
+### Feature 1 — single-timeframe 3M mode
+
+`TradeMode.single3m`: bias, zone and trigger all read the 3M series. One fetch,
+reused for all three slots (`c15`/`c4`/`c1` are the same list) — three requests
+for identical bytes would triple the weight for nothing.
+
+**The honest caveat, which the UI now carries.** With one series, one structure
+break contributes `+30` (bias) `+25` (OB) `+20` (trigger) at once, so a single
+timeframe can clear the 60-point STRICT gate on its own evidence. The weights are
+unchanged — that is the instruction — but "bias and zone agree" is not evidence
+when they are the same candles. `TradeMode.isSingleTimeframe` exposes that fact.
+
+Auto-refresh is 3 minutes in this mode (it was a flat 5, which would put a "fire
+when the candle closes" claim up to two bars late). The timer is rebuilt on mode
+switch rather than left at the old cadence.
+
+`3m` was added to the Bybit/OKX interval mappers. **MEXC has no 3-minute
+candle** and now throws instead of falling into the `default: '60m'` branch —
+a 3M request answered with hourly bars under a 3M label is the same class of lie
+as the 999-bar-age sentinel.
+
+### Feature 2 — MACD buy-only, own screen
+
+Rule, exactly as measured: BUY when **MACD line > signal AND histogram rising**.
+The histogram condition is load-bearing: "above signal" stays true for a long
+stretch and on its own re-fires every few bars, so the rising histogram is what
+makes the trigger the moment the spread opens.
+
+Own screen (chart icon in the app bar), because it deliberately ignores SMC
+structure, order blocks and the premium/discount gate. `Engine.ema`/`Engine.macd`
+mirror `mirror.ema`/`mirror.macd`; `test_mirror.py` pins the seeding rule and
+the fast/slow alignment so the two cannot drift.
+
+Measured, stop 3x ATR50, target 2R, 0.25% round trip, 6 seeds × 4 regimes:
+
+| stop | n | WR | gross | net | R/trade |
+|---|---|---|---|---|---|
+| 1x ATR50 | 6991 | 35.1% | +371.0 | −1397.5 | +0.053 |
+| 2x ATR50 | 8172 | 35.5% | +528.0 | −1416.4 | +0.065 |
+| **3x ATR50** | **4787** | **35.6%** | **+328.0** | **−422.5** | **+0.069** |
+
+Control (sell the same bars, same stop/target, no MACD filter): +286.0R gross at
+3x. So MACD does select better than taking everything — **+42R of gross edge** —
+and the fee is still about 2.3x the edge. The screen prints this rather than
+leaving it to be discovered.
+
+A first version of this measurement reported 3 trades in `trend` and 5702 in
+`volatile`: a 1x ATR50 stop on 3M is ~0.4%, under the v17.4 0.5% floor, so the
+floor was silently deciding which regimes produced any trades at all. That is
+why the stop is swept rather than fixed.
+
+Verification: tree-sitter 0 errors, `test_stamps` PASS, `test_mirror` PASS
+(4 assertions incl. the new MACD pin), `test_universe` PASS.

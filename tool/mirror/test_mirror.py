@@ -79,10 +79,29 @@ def test_scores_add_up():
     print('  scoring fragments present in Dart: PASS')
 
 
+def test_macd_matches_dart():
+    """The MACD screen prints Engine.macd's numbers.
+
+    Python cannot run Dart here, so this pins the two implementations to the
+    same DEFINITION: the Dart source must contain the same seeding rule and the
+    same alignment offset. A silent divergence would make the screen's numbers
+    unverifiable, which is exactly what measure_macd.py was written to avoid.
+    """
+    src = open(DART).read()
+    assert 'final out = <double>[seed / period];' in src, \
+        'Engine.ema no longer seeds with the SMA of the first period'
+    assert 'line.add(fastE[i + off] - slowE[i]);' in src, \
+        'Engine.macd alignment changed: fast/slow EMA offsets no longer match mirror.macd'
+    assert 'hist.add(line[start + i] - sigE[i]);' in src
+    assert 'static List<double>? macd(List<double> closes,' in src
+    print('  MACD implementation pinned to mirror: PASS')
+
+
 if __name__ == '__main__':
     print('mirror self-test')
     test_swings_matches_naive()
     test_mirror_is_the_dart_thresholds()
     test_scores_add_up()
+    test_macd_matches_dart()
     print('all mirror tests PASS')
     sys.exit(0)

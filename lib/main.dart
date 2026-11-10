@@ -21,7 +21,7 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v17.4 · real stops';
+const String kBuild = 'v18.0 · 3M modes';
 
 /// App version reported in the UI so an installed build is identifiable.
 ///
@@ -30,7 +30,7 @@ const String kBuild = 'v17.4 · real stops';
 /// an APK named `...-17.0.0-20.apk` while the code was `17.1.0+21`. The release
 /// workflow now reads pubspec.yaml directly and `test_stamps` fails the build
 /// if this line drifts again.
-const String kVersionName = '17.4.0+24';
+const String kVersionName = '18.0.0+25';
 
 
 /// How the three timeframes are stacked.
@@ -42,18 +42,45 @@ const String kVersionName = '17.4.0+24';
 /// MEXC does not even offer 3M), so 5M stands in as the trigger.
 enum TradeMode {
   swing,
-  scalp;
+  scalp,
+  single3m;
 
   /// Timeframe that provides the bias.
-  String get biasTf => this == TradeMode.swing ? '4H' : '30M';
+  String get biasTf => switch (this) {
+        TradeMode.swing => '4H',
+        TradeMode.scalp => '30M',
+        TradeMode.single3m => '3M',
+      };
 
   /// Timeframe that provides the order blocks, FVGs and premium/discount.
-  String get zoneTf => this == TradeMode.swing ? '1H' : '15M';
+  String get zoneTf => switch (this) {
+        TradeMode.swing => '1H',
+        TradeMode.scalp => '15M',
+        TradeMode.single3m => '3M',
+      };
 
   /// Timeframe that provides the live break trigger.
-  String get triggerTf => this == TradeMode.swing ? '15M' : '5M';
+  String get triggerTf => switch (this) {
+        TradeMode.swing => '15M',
+        TradeMode.scalp => '5M',
+        TradeMode.single3m => '3M',
+      };
 
-  String get label => this == TradeMode.swing ? 'Swing' : 'Scalp';
+  String get label => switch (this) {
+        TradeMode.swing => 'Swing',
+        TradeMode.scalp => 'Scalp',
+        TradeMode.single3m => '3M',
+      };
+
+  /// True when all three slots read the SAME series.
+  ///
+  /// This matters for honesty, not for scoring: with one series, "bias",
+  /// "zone" and "trigger" are three readings of the same candles, so one
+  /// structure break can contribute +30 and +25 and +20 at once. The score is
+  /// still built from the same weights, but agreement between horizons -- the
+  /// thing a multi-timeframe stack actually buys -- is absent by construction.
+  /// The UI says so instead of letting the number imply otherwise.
+  bool get isSingleTimeframe => biasTf == zoneTf && zoneTf == triggerTf;
 }
 
 /// Smallest stop, as a fraction of price, that is worth taking.
@@ -1492,6 +1519,8 @@ class MarketData {
 
   static String _bybitInterval(String tf) {
     switch (tf) {
+      case '3m':
+        return '3';
       case '5m':
         return '5';
       case '15m':
@@ -1538,6 +1567,8 @@ class MarketData {
 
   static String _okxBar(String tf) {
     switch (tf) {
+      case '3m':
+        return '3m';
       case '5m':
         return '5m';
       case '15m':
@@ -1593,7 +1624,12 @@ class MarketData {
 
   static String _mexcInterval(String tf) {
     switch (tf) {
-      // MEXC has no 3m interval; 5m is the shortest it publishes besides 1m.
+      // MEXC publishes no 3-minute candle. Throwing is deliberate: the old
+      // `default: return '60m'` meant a 3m request would have been answered
+      // with HOURLY bars and labelled "3M" on the card -- the same class of lie
+      // as the 999-bar-age sentinel. Better to fail and say which feed failed.
+      case '3m':
+        throw MarketDataException('mexc: no 3-minute candle');
       case '5m':
         return '5m';
       case '15m':
@@ -1729,6 +1765,54 @@ class Engine {
   }
 
   /// Average true range; LUX uses ATR(200) for its thresholds.
+  /// Standard EMA, seeded with the SMA of the first [period] values.
+  ///
+  /// Mirrors `mirror.ema`. Seeding matters: starting from the first close
+  /// instead of the SMA leaves a bias that only dies out after ~5x the period,
+  /// which on a 3M chart is most of the session.
+  static List<double> ema(List<double> values, int period) {
+    if (values.length < period) return <double>[];
+    final k = 2.0 / (period + 1);
+    var seed = 0.0;
+    for (var i = 0; i < period; i++) {
+      seed += values[i];
+    }
+    final out = <double>[seed / period];
+    for (var i = period; i < values.length; i++) {
+      out.add(values[i] * k + out.last * (1 - k));
+    }
+    return out;
+  }
+
+  /// MACD(12,26,9) aligned to the tail of [closes].
+  ///
+  /// Returns `[line, signal, hist, prevHist]` or null when there are not
+  /// enough bars for the slow EMA plus the signal EMA. Mirrors
+  /// `mirror.macd`, which `measure_macd.py` used for every number printed on
+  /// the MACD screen.
+  static List<double>? macd(List<double> closes,
+      {int fast = 12, int slow = 26, int signal = 9}) {
+    if (closes.length < slow + signal + 2) return null;
+    final fastE = ema(closes, fast);
+    final slowE = ema(closes, slow);
+    if (fastE.isEmpty || slowE.isEmpty) return null;
+    final off = slow - fast;
+    if (off < 0 || fastE.length <= off) return null;
+    final line = <double>[];
+    for (var i = 0; i < slowE.length; i++) {
+      line.add(fastE[i + off] - slowE[i]);
+    }
+    final sigE = ema(line, signal);
+    if (sigE.isEmpty || line.length < sigE.length) return null;
+    final hist = <double>[];
+    final start = line.length - sigE.length;
+    for (var i = 0; i < sigE.length; i++) {
+      hist.add(line[start + i] - sigE[i]);
+    }
+    if (hist.length < 2) return null;
+    return <double>[line.last, sigE.last, hist.last, hist[hist.length - 2]];
+  }
+
   static double atr(List<Candle> c, {int period = 14}) {
     if (c.length < 2) return 0;
     int n = period;
@@ -3009,9 +3093,26 @@ class _HS extends State<HomeScreen> {
   void initState() {
     super.initState();
     run();
-    _timer = Timer.periodic(const Duration(minutes: 5), (_) {
-      if (!_loading) run();
-    });
+    _restartTimer();
+  }
+
+  /// Auto-refresh cadence follows the mode.
+  ///
+  /// A 3M mode that only re-scanned every 5 minutes would be 100 minutes late
+  /// on a signal it claims to give "as soon as the candle closes", so the 3M
+  /// mode refreshes on its own bar boundary. The scan itself takes ~90 s cold,
+  /// which is why this is a floor and not a promise: a scan is never queued
+  /// while one is already running.
+  void _restartTimer() {
+    _timer?.cancel();
+    _timer = Timer.periodic(
+      _mode.isSingleTimeframe
+          ? const Duration(minutes: 3)
+          : const Duration(minutes: 5),
+      (_) {
+        if (!_loading) run();
+      },
+    );
   }
 
   @override
@@ -3134,10 +3235,23 @@ class _HS extends State<HomeScreen> {
             final trigTf = _mode.triggerTf.toLowerCase();
             final biasTf = _mode.biasTf.toLowerCase();
             final zoneTf = _mode.zoneTf.toLowerCase();
-            final c15 = await MarketData.candles(sym, trigTf, 500, scan: true);
-            final c4 = await MarketData.candles(sym, biasTf, 400,
-                liveFrom: c15, scan: true);
-            final c1 = await MarketData.candles(sym, zoneTf, 500, scan: true);
+            // Single-timeframe mode fetches ONE series and reuses it for all
+            // three slots. Fetching the same 3M candles three times would be
+            // three times the weight for the same bytes, and could hand the
+            // engine three series that disagree by a bar.
+            final List<Candle> c15;
+            final List<Candle> c4;
+            final List<Candle> c1;
+            if (_mode.isSingleTimeframe) {
+              c15 = await MarketData.candles(sym, trigTf, 500, scan: true);
+              c4 = c15;
+              c1 = c15;
+            } else {
+              c15 = await MarketData.candles(sym, trigTf, 500, scan: true);
+              c4 = await MarketData.candles(sym, biasTf, 400,
+                  liveFrom: c15, scan: true);
+              c1 = await MarketData.candles(sym, zoneTf, 500, scan: true);
+            }
 
             if (id != _scanId || !mounted) return;
 
@@ -3360,6 +3474,17 @@ class _HS extends State<HomeScreen> {
         ),
         actions: <Widget>[
           IconButton(
+            icon: const Icon(Icons.show_chart, color: K.text),
+            tooltip: 'MACD buy (3M)',
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const MacdScreen(),
+                ),
+              );
+            },
+          ),
+          IconButton(
             icon: const Icon(Icons.insights, color: K.text),
             tooltip: 'Backtest',
             onPressed: () {
@@ -3405,6 +3530,7 @@ class _HS extends State<HomeScreen> {
                   onTap: () {
                     if (_mode == m) return;
                     setState(() => _mode = m);
+                    _restartTimer();
                     run();
                   },
                   child: Container(
@@ -4526,3 +4652,333 @@ class _BTS extends State<BacktestScreen> {
   }
 }
 
+
+/// MACD buy-only on 3-minute candles -- its own screen, as asked.
+///
+/// The rule is exactly the one measured in `tool/mirror/measure_macd.py`:
+/// BUY when the MACD line is above its signal line **and** the histogram is
+/// rising. Nothing else is consulted -- no SMC structure, no order blocks, no
+/// order-block entry. That is the point of a separate screen: it must not look
+/// like the main scanner's confidence, because it is not the same evidence.
+///
+/// What the measurement says, and therefore what this screen says:
+///
+///   stop 3x ATR50, target 2R, 0.25% round trip, 6 seeds x 4 regimes:
+///     4787 trades, 35.6% win rate, gross +328.0R, net -422.5R
+///
+/// Gross is positive and better than taking every bar (+328R vs +286R), so the
+/// MACD filter does select. The fee is simply larger than the edge. That is
+/// printed on the screen rather than left for the user to discover.
+class MacdScreen extends StatefulWidget {
+  const MacdScreen({Key? key}) : super(key: key);
+
+  @override
+  State<MacdScreen> createState() => _MCS();
+}
+
+class _MacdHit {
+  _MacdHit(this.symbol, this.price, this.macd, this.signal, this.hist,
+      this.prevHist, this.atr, this.entry, this.sl, this.tp, this.staleBars);
+
+  final String symbol;
+  final double price;
+  final double macd;
+  final double signal;
+  final double hist;
+  final double prevHist;
+  final double atr;
+  final double entry;
+  final double sl;
+  final double tp;
+
+  /// Closed 3M bars since the histogram first started rising. 0 = this bar.
+  final int staleBars;
+
+  double get risk => (entry - sl).abs();
+  double get riskPct => entry <= 0 ? 0 : risk / entry * 100;
+  bool get worthTaking => riskPct >= kMinStopPct * 100;
+}
+
+class _MCS extends State<MacdScreen> {
+  bool _loading = false;
+  String _msg = 'Scan shuru koro';
+  final List<_MacdHit> _hits = <_MacdHit>[];
+
+  Future<void> run() async {
+    setState(() {
+      _loading = true;
+      _hits.clear();
+      _msg = '3M MACD scanning...';
+    });
+    try {
+      final coins = await MarketData.marketScan(
+        gainers: MarketData.scanTarget ~/ 2,
+        losers: MarketData.scanTarget ~/ 2,
+      );
+      var done = 0;
+      for (final c in coins) {
+        var bars = <Candle>[];
+        try {
+          bars = await MarketData.candles(c.symbol, '3m', 500, scan: true);
+        } catch (_) {
+          continue;
+        }
+        done++;
+        if (done % 10 == 0) {
+          setState(() => _msg = '3M MACD $done/${coins.length}');
+        }
+        if (bars.length < 60) continue;
+        final closes = bars.map((k) => k.close).toList();
+        final m = Engine.macd(closes);
+        if (m == null) continue;
+        final line = m[0];
+        final sig = m[1];
+        final hist = m[2];
+        final prevHist = m[3];
+        if (!(line > sig && hist > prevHist)) continue;
+
+        // How long has the histogram been rising? Walk back over closed bars.
+        var rising = 0;
+        for (var k = closes.length - 1; k > 60 && rising < 200; k--) {
+          final w = Engine.macd(closes.sublist(0, k + 1));
+          if (w == null) break;
+          if (w[2] > w[3]) {
+            rising++;
+          } else {
+            break;
+          }
+        }
+
+        final atr = Engine.atr(bars, period: 50);
+        if (atr <= 0) continue;
+        // 3x ATR50: the multiple that cleared the 0.5% stop floor on 3M data
+        // (a 1x stop is ~0.4%, which the engine refuses).
+        final risk = atr * 3;
+        final entry = bars.last.close;
+        _hits.add(_MacdHit(c.symbol, entry, line, sig, hist, prevHist, atr,
+            entry, entry - risk, entry + risk * 2, rising));
+      }
+      _hits.sort((a, b) => a.staleBars.compareTo(b.staleBars));
+      setState(() {
+        _loading = false;
+        _msg = _hits.isEmpty
+            ? 'Ekhon kono 3M MACD buy nei (${coins.length} coin dekha holo)'
+            : '${_hits.length} coin-e 3M MACD buy (${coins.length} scanned)';
+      });
+    } catch (e) {
+      setState(() {
+        _loading = false;
+        _msg = 'Scan fail: ${e.toString().split(':').first}';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: K.bg,
+      appBar: AppBar(
+        backgroundColor: K.panel,
+        title: const Text('MACD buy · 3M',
+            style: TextStyle(color: K.text, fontSize: 16)),
+        iconTheme: const IconThemeData(color: K.text),
+        actions: <Widget>[
+          IconButton(
+            icon: const Icon(Icons.refresh, color: K.text),
+            onPressed: _loading ? null : run,
+          ),
+        ],
+      ),
+      body: Column(
+        children: <Widget>[
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+            decoration: const BoxDecoration(
+              border: Border(bottom: BorderSide(color: K.line)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: <Widget>[
+                    Text(
+                      _msg,
+                      style: const TextStyle(color: K.text, fontSize: 12),
+                    ),
+                    if (_loading)
+                      const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: K.green),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'Rule: MACD(12/26/9) line > signal AND histogram rising. '
+                  'Buy only. Stop 3x ATR50, target 2R.',
+                  style: TextStyle(color: K.muted, fontSize: 10, height: 1.4),
+                ),
+                const SizedBox(height: 6),
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: K.orange.withOpacity(0.10),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: K.orange.withOpacity(0.35)),
+                  ),
+                  child: const Text(
+                    'Measured on 4787 trades: gross +328R, net -422R at 0.25% '
+                    'round trip. MACD selects better than random (+328R vs '
+                    '+286R) but the fee is bigger than the edge. Use it as a '
+                    'filter for your own idea, not as a signal to follow.',
+                    style: TextStyle(color: K.orange, fontSize: 10, height: 1.4),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: RefreshIndicator(
+              onRefresh: run,
+              color: K.green,
+              backgroundColor: K.panel,
+              child: _hits.isEmpty
+                  ? ListView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      children: <Widget>[
+                        SizedBox(
+                            height:
+                                MediaQuery.of(context).size.height * 0.12),
+                        Icon(
+                          _loading ? Icons.hourglass_empty : Icons.search_off,
+                          size: 42,
+                          color: K.muted,
+                        ),
+                        const SizedBox(height: 10),
+                        Center(
+                          child: Padding(
+                            padding:
+                                const EdgeInsets.symmetric(horizontal: 30),
+                            child: Text(
+                              _loading
+                                  ? 'Scanning...'
+                                  : 'Run chapo — 400 coin-e 3M MACD check hobe. '
+                                      'Eta 3-4 minute nite pare.',
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                  color: K.muted, fontSize: 12, height: 1.5),
+                            ),
+                          ),
+                        ),
+                      ],
+                    )
+                  : ListView.builder(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      padding: const EdgeInsets.fromLTRB(12, 10, 12, 20),
+                      itemCount: _hits.length,
+                      itemBuilder: (context, i) => _macdCard(_hits[i]),
+                    ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _macdCard(_MacdHit h) {
+    final fresh = h.staleBars == 0;
+    final color = fresh ? K.green : K.orange;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: K.panel,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: K.line),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: Text(
+                  h.symbol.replaceAll('USDT', ''),
+                  style: const TextStyle(
+                      color: K.text,
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold),
+                ),
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                decoration: BoxDecoration(
+                  color: color.withOpacity(0.16),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  fresh ? 'BUY now' : 'rising ${h.staleBars} bar',
+                  style: TextStyle(
+                      color: color,
+                      fontSize: 9,
+                      fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: <Widget>[
+              _mcell('ENTRY', fmtPrice(h.entry), K.text),
+              _mcell('SL', fmtPrice(h.sl), K.red),
+              _mcell('TP', fmtPrice(h.tp), K.green),
+              _mcell('RISK', '${h.riskPct.toStringAsFixed(2)}%',
+                  kMinStopPct * 100 > h.riskPct ? K.red : K.muted),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'MACD ${h.macd.toStringAsFixed(4)} > signal '
+            '${h.signal.toStringAsFixed(4)} · hist ${h.hist.toStringAsFixed(4)} '
+            '(prev ${h.prevHist.toStringAsFixed(4)})',
+            style: const TextStyle(color: K.muted, fontSize: 10),
+          ),
+          if (!h.worthTaking) ...<Widget>[
+            const SizedBox(height: 6),
+            Text(
+              'Stop ${h.riskPct.toStringAsFixed(2)}% — '
+              '${(kMinStopPct * 100).toStringAsFixed(1)}% floor-er niche, '
+              'fee ek R-er boro hissa khaye. Trade na.',
+              style: const TextStyle(color: K.orange, fontSize: 10),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _mcell(String label, String value, Color color) => Expanded(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(label,
+                style: const TextStyle(color: K.muted, fontSize: 9)),
+            const SizedBox(height: 3),
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(value,
+                  style: TextStyle(
+                      color: color,
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold)),
+            ),
+          ],
+        ),
+      );
+}

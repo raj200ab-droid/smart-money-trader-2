@@ -105,6 +105,59 @@ def gen_scalp(seed, n5=9000, regime='mixed'):
     return bucket(path, T30), bucket(path, T15), bucket(path, T5)
 
 
+def gen_3m(seed, minutes=27000, regime='mixed'):
+    """Same volatility regime, bucketed to 3-minute candles.
+
+    The other generators step 5 minutes at a time, and 5 does not divide 3: a
+    5-minute bar bucketed into 3-minute buckets produces bars that are labelled
+    3M but span 5 minutes of price action. So this builds its own 1-minute path
+    (all of 3/5/15/30 divide 1) and buckets that.
+
+    Per-minute volatility is the 5-minute figure divided by sqrt(5), so the
+    annualised volatility matches the other generators and a 3M-vs-scalp
+    comparison is not confounded by a quieter market.
+
+    Returns (3M, 3M, 3M): the single-timeframe mode feeds one series into all
+    three engine slots.
+    """
+    T3 = 3 * 60 * 1000
+    T1 = 60 * 1000
+    rnd = random.Random(seed)
+    start = 1730000000000
+    start -= start % T3
+    drift5, vol5 = {'trend': (0.00006, 0.004), 'range': (0.0, 0.004),
+                    'volatile': (0.00002, 0.012),
+                    'mixed': (0.00004, 0.006)}[regime]
+    drift, vol = drift5 / 5.0, vol5 / (5 ** 0.5)
+    px, path = 100.0, []
+    for i in range(minutes):
+        if regime == 'mixed' and i % 1050 == 0:      # ~2100 5M steps
+            drift = rnd.choice([-0.00008, 0.0, 0.00008]) / 5.0
+            vol = rnd.choice([0.003, 0.006, 0.011]) / (5 ** 0.5)
+        r = rnd.gauss(drift, vol)
+        new = max(0.01, px * (1 + r))
+        path.append({'open': px,
+                     'high': max(px, new) * (1 + abs(rnd.gauss(0, vol * 0.25))),
+                     'low': min(px, new) * (1 - abs(rnd.gauss(0, vol * 0.25))),
+                     'close': new, 'volume': abs(rnd.gauss(200, 80)) + 1})
+        px = new
+
+    out, cur = [], None
+    for idx, k in enumerate(path):
+        b = ((start + idx * T1) // T3) * T3
+        if cur is None or cur['openTime'] != b:
+            cur = {'openTime': b, 'closeTime': b + T3 - 1, 'open': k['open'],
+                   'high': k['high'], 'low': k['low'], 'close': k['close'],
+                   'volume': k['volume']}
+            out.append(cur)
+        else:
+            cur['high'] = max(cur['high'], k['high'])
+            cur['low'] = min(cur['low'], k['low'])
+            cur['close'] = k['close']
+            cur['volume'] += k['volume']
+    return out, out, out
+
+
 def job(args):
     regime, seed, mode, pct = args
     c4, c1, c15 = gen(seed, regime=regime)

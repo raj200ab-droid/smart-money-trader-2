@@ -513,7 +513,7 @@ def multi_tf(c4, c1, c15, relaxed=False, tp_mode='swing', tp_pct=1.05,
 # ---------------------------------------------------------------- walk forward
 def walk(c4, c1, c15, step=1, window=200, window4h=400, max_trades=200,
          tp_mode='swing', tp_pct=1.05, fresh_only=False, fresh_bars=0,
-         min_stop_pct=None):
+         min_stop_pct=None, fill_bars=5):
     """Mirror of Backtester.run. No look-ahead, one trade at a time."""
     trades = []
     n = len(c15)
@@ -521,6 +521,7 @@ def walk(c4, c1, c15, step=1, window=200, window4h=400, max_trades=200,
         return trades
     open_until = -1
     last_signal_bar = -window
+    missed = 0
 
     def aligned(series, time, count):
         end = len(series)
@@ -549,8 +550,39 @@ def walk(c4, c1, c15, step=1, window=200, window4h=400, max_trades=200,
         if sig is None:
             continue
         is_buy = sig['direction'] == 'BUY'
+
+        # ---- realistic fill -------------------------------------------------
+        # `entry` is the order-block MIDPOINT when the block is within 2% of
+        # price, i.e. a LIMIT order away from the market. The old code booked
+        # that price as filled on the next bar no matter what -- so a BUY could
+        # "enter" below the lowest price the market ever traded, and then be
+        # counted as a win. Measured: 71 of 84 single-3M trades entered at a
+        # price their own decision bar never reached.
+        #
+        # A limit only fills if price comes back to it. If it never does inside
+        # `fill_bars`, the setup is missed and there is no trade.
+        px_now = c15[i]['close']
+        limit = sig['entry']
+        fill_bar = i + 1
+        if is_buy and limit < px_now * 0.999999:
+            fill_bar = -1
+            for j in range(i + 1, min(n, i + 1 + fill_bars)):
+                if c15[j]['low'] <= limit:
+                    fill_bar = j
+                    break
+        elif (not is_buy) and limit > px_now * 1.000001:
+            fill_bar = -1
+            for j in range(i + 1, min(n, i + 1 + fill_bars)):
+                if c15[j]['high'] >= limit:
+                    fill_bar = j
+                    break
+        if fill_bar < 0:
+            missed += 1
+            last_signal_bar = i
+            continue
+
         outcome, r_mult, exit_bar = 'OPEN', 0.0, n - 1
-        for j in range(i + 1, n):
+        for j in range(fill_bar, n):
             bar = c15[j]
             hit_sl = bar['low'] <= sig['sl'] if is_buy else bar['high'] >= sig['sl']
             hit_tp = bar['high'] >= sig['tp'] if is_buy else bar['low'] <= sig['tp']
@@ -568,6 +600,7 @@ def walk(c4, c1, c15, step=1, window=200, window4h=400, max_trades=200,
         last_signal_bar = i
         if len(trades) >= max_trades:
             break
+    walk.missed = missed
     return trades
 
 
@@ -582,3 +615,54 @@ def summarise(trades, cost_r=0.0):
             'winRate': len(wins) / len(closed) * 100 if closed else 0.0,
             'totalR': total, 'avgR': total / len(closed) if closed else 0.0,
             'buys': buys, 'sells': len(trades) - buys}
+
+
+# ------------------------------------------------------------------- MACD
+def ema(values, period):
+    """Standard EMA, seeded with the SMA of the first `period` values."""
+    if len(values) < period:
+        return []
+    k = 2.0 / (period + 1)
+    out = [sum(values[:period]) / period]
+    for v in values[period:]:
+        out.append(v * k + out[-1] * (1 - k))
+    return out
+
+
+def macd(closes, fast=12, slow=26, signal=9):
+    """MACD line, signal line and histogram, aligned to the tail of `closes`.
+
+    Returns (macd_now, signal_now, hist_now, hist_prev) or None. Both lines are
+    EMA-derived so the result needs slow+signal bars; below that the function
+    refuses rather than returning a number built on a short average.
+    """
+    if len(closes) < slow + signal + 2:
+        return None
+    fast_e = ema(closes, fast)
+    slow_e = ema(closes, slow)
+    # Align: fast starts at index fast-1, slow at slow-1.
+    off = slow - fast
+    line = [f - s for f, s in zip(fast_e[off:], slow_e)]
+    if len(line) < signal + 1:
+        return None
+    sig_e = ema(line, signal)
+    hist = [l - s for l, s in zip(line[-len(sig_e):], sig_e)]
+    if len(hist) < 2:
+        return None
+    return line[-1], sig_e[-1], hist[-1], hist[-2]
+
+
+def macd_buy(closes):
+    """The requested buy-only MACD rule.
+
+    BUY when the MACD line is above its signal line AND the histogram is
+    rising. The histogram rising is the part that matters: "above signal" stays
+    true for a long stretch, so on its own it re-fires the same entry every few
+    bars. Requiring the histogram to grow means the trigger is the moment the
+    spread is opening, not the whole time it is open.
+    """
+    m = macd(closes)
+    if m is None:
+        return False
+    line, sig, hist, hist_prev = m
+    return line > sig and hist > hist_prev
