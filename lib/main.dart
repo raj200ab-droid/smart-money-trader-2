@@ -4789,6 +4789,7 @@ class _HS extends State<HomeScreen> {
             return _SignalCard(
               signal: items[k],
               onTap: () => _showDetails(items[k]),
+              geminiBadge: _geminiBadge(items[k].symbol),
             );
           }
           if (k == items.length) return _quietHeader();
@@ -5033,10 +5034,20 @@ class _TfBadge extends StatelessWidget {
 }
 
 class _SignalCard extends StatelessWidget {
-  const _SignalCard({required this.signal, required this.onTap});
+  const _SignalCard({
+    required this.signal,
+    required this.onTap,
+    this.geminiBadge,
+  });
 
   final TradeSignal signal;
   final VoidCallback onTap;
+
+  /// The Gemini stance chip, built by the screen (which owns the notes) and
+  /// handed in as a widget. The card must not know what Gemini is -- it renders
+  /// one opaque chip next to the engine's tier, which keeps the advisory /
+  /// engine separation visible in the code and not just in the comments.
+  final Widget? geminiBadge;
 
   @override
   Widget build(BuildContext context) {
@@ -5108,8 +5119,7 @@ class _SignalCard extends StatelessWidget {
                           // A model opinion sits next to the tier chip, never
                           // inside it: the tier is the engine's, the badge is
                           // somebody else's view of the same trade.
-                          if (_geminiBadge(signal.symbol) != null)
-                            _geminiBadge(signal.symbol) as Widget,
+                          if (geminiBadge != null) geminiBadge!,
                           Flexible(
                             child: Text(
                               '${signal.direction} • ${signal.pattern} • '
