@@ -1573,3 +1573,25 @@ stops and targets.
 CI runs `test_3m_scalp.py`, which skips the data-dependent checks when the kline
 cache is absent (GitHub CI does not have 200 MB of CSV) and says so in the log
 rather than passing silently.
+
+### Shipped
+
+Released as **v18.2.0** on 2026-11-08.
+
+| item | value |
+|---|---|
+| commit | `ba76780` |
+| build CI | `42910839896` success (analyze green) |
+| release run | `42911343418` success |
+| asset | `smart-money-trader-v18.2-3M-scalp-fee-gate--18.2.0-27.apk`, 20 692 621 B |
+| download link | 302 |
+
+Two things this release fixed about its own process:
+
+1. `test_3m_order.py` from v18.1 asserted the literal string
+   `if (a.mode == TradeMode.single3m) {`. Widening the ordering to both 3M modes
+   broke it, correctly. The pin now asserts the SET of modes, not one spelling.
+2. The first version of `Engine.scalp3m` used the existing simple `atr()` while
+   `mirror3m.py` used Wilder. The parity test was written exactly to catch this
+   class of drift and did: the app now uses `atrWilder`, and `test_3m_parity.py`
+   compares 36 360 real bars decision by decision.
