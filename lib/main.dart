@@ -46,31 +46,27 @@ enum TradeMode {
   single3m;
 
   /// Timeframe that provides the bias.
-  String get biasTf => switch (this) {
-        TradeMode.swing => '4H',
-        TradeMode.scalp => '30M',
-        TradeMode.single3m => '3M',
-      };
+  String get biasTf {
+    if (this == TradeMode.swing) return '4H';
+    return this == TradeMode.scalp ? '30M' : '3M';
+  }
 
   /// Timeframe that provides the order blocks, FVGs and premium/discount.
-  String get zoneTf => switch (this) {
-        TradeMode.swing => '1H',
-        TradeMode.scalp => '15M',
-        TradeMode.single3m => '3M',
-      };
+  String get zoneTf {
+    if (this == TradeMode.swing) return '1H';
+    return this == TradeMode.scalp ? '15M' : '3M';
+  }
 
   /// Timeframe that provides the live break trigger.
-  String get triggerTf => switch (this) {
-        TradeMode.swing => '15M',
-        TradeMode.scalp => '5M',
-        TradeMode.single3m => '3M',
-      };
+  String get triggerTf {
+    if (this == TradeMode.swing) return '15M';
+    return this == TradeMode.scalp ? '5M' : '3M';
+  }
 
-  String get label => switch (this) {
-        TradeMode.swing => 'Swing',
-        TradeMode.scalp => 'Scalp',
-        TradeMode.single3m => '3M',
-      };
+  String get label {
+    if (this == TradeMode.swing) return 'Swing';
+    return this == TradeMode.scalp ? 'Scalp' : '3M';
+  }
 
   /// True when all three slots read the SAME series.
   ///
@@ -1811,6 +1807,42 @@ class Engine {
     }
     if (hist.length < 2) return null;
     return <double>[line.last, sigE.last, hist.last, hist[hist.length - 2]];
+  }
+
+  /// Consecutive closed bars at the end of [closes] where the MACD histogram
+  /// rose. 0 means the last bar is the first rising one.
+  ///
+  /// Computed in one pass over the shared EMA series: calling [macd] on every
+  /// prefix is quadratic, and on a 400-coin scan that is the difference between
+  /// a scan and a hang.
+  static int histRisingBars(List<double> closes,
+      {int fast = 12, int slow = 26, int signal = 9}) {
+    if (closes.length < slow + signal + 2) return 0;
+    final fastE = ema(closes, fast);
+    final slowE = ema(closes, slow);
+    if (fastE.isEmpty || slowE.isEmpty) return 0;
+    final off = slow - fast;
+    if (off < 0 || fastE.length <= off) return 0;
+    final line = <double>[];
+    for (var i = 0; i < slowE.length; i++) {
+      line.add(fastE[i + off] - slowE[i]);
+    }
+    final sigE = ema(line, signal);
+    if (sigE.length < 2) return 0;
+    final start = line.length - sigE.length;
+    final hist = <double>[];
+    for (var i = 0; i < sigE.length; i++) {
+      hist.add(line[start + i] - sigE[i]);
+    }
+    var rising = 0;
+    for (var i = hist.length - 1; i > 0; i--) {
+      if (hist[i] > hist[i - 1]) {
+        rising++;
+      } else {
+        break;
+      }
+    }
+    return rising;
   }
 
   static double atr(List<Candle> c, {int period = 14}) {
@@ -4677,16 +4709,14 @@ class MacdScreen extends StatefulWidget {
 }
 
 class _MacdHit {
-  _MacdHit(this.symbol, this.price, this.macd, this.signal, this.hist,
-      this.prevHist, this.atr, this.entry, this.sl, this.tp, this.staleBars);
+  _MacdHit(this.symbol, this.macd, this.signal, this.hist, this.prevHist,
+      this.entry, this.sl, this.tp, this.staleBars);
 
   final String symbol;
-  final double price;
   final double macd;
   final double signal;
   final double hist;
   final double prevHist;
-  final double atr;
   final double entry;
   final double sl;
   final double tp;
@@ -4737,17 +4767,10 @@ class _MCS extends State<MacdScreen> {
         final prevHist = m[3];
         if (!(line > sig && hist > prevHist)) continue;
 
-        // How long has the histogram been rising? Walk back over closed bars.
-        var rising = 0;
-        for (var k = closes.length - 1; k > 60 && rising < 200; k--) {
-          final w = Engine.macd(closes.sublist(0, k + 1));
-          if (w == null) break;
-          if (w[2] > w[3]) {
-            rising++;
-          } else {
-            break;
-          }
-        }
+        // How long has the histogram been rising? Recomputed from the shared
+        // EMA series rather than by calling macd() on every prefix (that is
+        // O(n^2) per coin -- 200 recalculations of 500 bars x 400 coins).
+        final rising = Engine.histRisingBars(closes);
 
         final atr = Engine.atr(bars, period: 50);
         if (atr <= 0) continue;
@@ -4755,7 +4778,7 @@ class _MCS extends State<MacdScreen> {
         // (a 1x stop is ~0.4%, which the engine refuses).
         final risk = atr * 3;
         final entry = bars.last.close;
-        _hits.add(_MacdHit(c.symbol, entry, line, sig, hist, prevHist, atr,
+        _hits.add(_MacdHit(c.symbol, line, sig, hist, prevHist,
             entry, entry - risk, entry + risk * 2, rising));
       }
       _hits.sort((a, b) => a.staleBars.compareTo(b.staleBars));
