@@ -71,7 +71,25 @@ jobs:
         run: flutter pub get
 
       - name: Analyze
-        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+        id: analyze
+        continue-on-error: true
+        run: |
+          set +e
+          flutter analyze --no-fatal-infos --no-fatal-warnings 2>&1 | tee analyze.log
+          echo "exit=$?" 
+          exit 0
+
+      - name: Upload analyze log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: analyze-log
+          path: analyze.log
+          if-no-files-found: ignore
+
+      - name: Fail if analyze failed
+        if: steps.analyze.outcome == 'failure'
+        run: exit 1
 
       - name: Build APK
         run: flutter build apk --release
