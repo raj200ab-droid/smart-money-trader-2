@@ -1697,3 +1697,63 @@ cherry-picking onto `85a9015` left conflict markers inside
 markers before pushing, not by the test run (the markers sat in code paths the
 test did not execute). The marker check is now part of the routine before a
 commit, and the file was restored from the known-good commit.
+
+---
+
+## §33 · v18.4.0 — Gemini as a second opinion (2026-11-08)
+
+**Ask.** "আমি চাই আমার সব mode-এ Gemini add করতে, যেন সে আরো ভালো decision দিতে পারে.
+App-এর মধ্যে Gemini API key add করার একটা option, আর Gemini যেন সব signal-এ help করতে পারে."
+
+**What that has to mean.** "Help" cannot mean "change the answer". If the model could add,
+drop or re-rank a signal, the app would have two engines and no way to say which one
+produced what — and the one thing this project has been careful about is that every
+number on screen is reproducible from the rule. So Gemini is built as an **advisor**:
+
+| Layer | What it does | What it can't do |
+|---|---|---|
+| `GeminiService.reviewSignal` | one signal → STANCE / CONFIDENCE / WHY / RISK / WHEN | touch the signal |
+| `_autoReview` | reviews the **top 3** after a scan | delay the scan (fire-and-forget) |
+| `_reviewScan` | one note about the whole scan | re-order the list |
+| `GeminiNote` | stored in `_gNotes` / `_gScanNote` | be the source of truth |
+
+Enforced by construction and pinned by `tool/mirror/test_gemini.py` (7 groups, 22 checks):
+no `await` on a review, no review statement writes `_signals`/`_quiets`/`_scratch`, the sort
+never reads a note, the chip is *passed into* `_SignalCard` rather than built there.
+
+**Why the prompt attacks instead of approves.** Ask a model "is this a good trade" and it
+says yes — the answer is a function of the question, not the setup. The system prompt
+orders it to find the reason the trade fails, and hands it the arithmetic to argue with:
+`feeR = round-trip cost / stop distance` and `barsToTarget = reward% / typical bar move`.
+A criticism that can be checked is worth more than a verdict that cannot.
+
+**Key in-app, key on the device.** Settings sheet behind the sparkle icon in the app bar:
+masked field, **Test key** (real `generateContent` round trip), **Find a model** (`GET
+/models`, keeps only `generateContent` models — a retired model name is the second most
+likely failure after a typo), two switches. No `shared_preferences`: adding it means a new
+pub.dev fetch inside the release build, and that build has already failed on network steps.
+Instead `tool/patch_prefs.py` writes a ~40-line Kotlin handler over the app-private
+`SharedPreferences` and installs it into the `flutter create` scaffold, idempotently, and
+fails the build if the generated Kotlin does not balance.
+
+**Two failure modes found while shipping, both fixed.**
+1. The patch step failed in CI in **0 seconds**, twice, with unreadable logs. Cause: the
+   script searched `android/` only. It now searches the whole tree and prints a traceback
+   and the resolved package.
+2. `_geminiBadge` was called from `_SignalCard`, which is a different class → 2 analyzer
+   errors, invisible because this repo's Actions logs and artifacts are served from a host
+   this environment cannot reach. Fixed by passing the chip in as a `Widget?` (also the
+   better design) and by **publishing `flutter analyze` output as workflow annotations**,
+   which does come back through the API. That CI change is worth keeping beyond this
+   version: for the first time a broken build reports *why*.
+
+**Costs, stated plainly.** One review = ~1.5 k input tokens. Auto mode = 4 requests per
+scan (3 signals + 1 scan) ≈ 20 k tokens/hour at the 5-minute refresh, well inside the free
+tier. `maxOutputTokens 700`, `temperature 0.2`, 45 s timeout, `_gInFlight` dedupe, failures
+stored as notes so nothing retries in a loop.
+
+**Not verified.** No Android device here, so the settings sheet, the chip and the Kotlin
+channel are compile-verified and test-verified but **not run-verified**. `GeminiStore.persistent`
+returns false when the channel is missing, and the sheet then shows a warning instead of
+pretending the key was saved — the honest failure, but it means the first real-world check
+is the user's.

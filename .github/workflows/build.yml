@@ -45,27 +45,8 @@ jobs:
       - name: Enable network permission for release builds
         run: python3 tool/patch_manifest.py
 
-      - name: Debug android tree
-        if: always()
-        run: |
-          echo "--- MainActivity candidates ---"
-          find . -name "MainActivity.*" -not -path "*/build/*" 2>/dev/null
-          echo "--- android/app tree (depth 6) ---"
-          find android/app -maxdepth 6 -type f 2>/dev/null | head -40
-          ls -la android/app/src/main/ 2>/dev/null
-
       - name: Add device storage for the Gemini key
-        id: prefs
-        continue-on-error: true
         run: python3 tool/patch_prefs.py
-
-      - name: Upload prefs patch diagnosis
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: prefs-debug
-          path: prefs_debug.txt
-          if-no-files-found: ignore
 
       - name: Get Dependencies
         run: flutter pub get
