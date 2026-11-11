@@ -23,7 +23,7 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v18.4 · Gemini advisor';
+const String kBuild = 'v18.5 · 3M quiet list says why';
 
 /// App version reported in the UI so an installed build is identifiable.
 ///
@@ -32,7 +32,7 @@ const String kBuild = 'v18.4 · Gemini advisor';
 /// an APK named `...-17.0.0-20.apk` while the code was `17.1.0+21`. The release
 /// workflow now reads pubspec.yaml directly and `test_stamps` fails the build
 /// if this line drifts again.
-const String kVersionName = '18.4.0+29';
+const String kVersionName = '18.5.0+30';
 
 
 /// How the three timeframes are stacked.
@@ -3428,10 +3428,19 @@ class _CoinOut {
 }
 
 class _Quiet {
-  _Quiet(this.symbol, this.chop, this.trend);
+  _Quiet(this.symbol, this.chop, this.trend, {this.why = ''});
+
   final String symbol;
   final double chop;
   final String trend;
+
+  /// Which condition refused this coin, in the mode's own words.
+  ///
+  /// The empty-state header counts refusals per stage, but the rows underneath
+  /// printed only the trend -- so a bearish coin sat under a header about
+  /// direction while it had actually been refused for being too quiet. The
+  /// count and the rows now come from the same fact.
+  final String why;
 }
 
 class _HS extends State<HomeScreen> {
@@ -3736,11 +3745,14 @@ class _HS extends State<HomeScreen> {
               if (mounted) setState(() => _tooYoung++);
             } else if (_mode.isScalp3m) {
               // Own path: no SMC scoring, no radar, no bias analysis.
+              String? refused;
               var sig3 = Engine.scalp3m(
                 sym,
                 w15,
-                onRefuse: (stage) => _scalp3mWhy[stage] =
-                    (_scalp3mWhy[stage] ?? 0) + 1,
+                onRefuse: (stage) {
+                  refused = stage;
+                  _scalp3mWhy[stage] = (_scalp3mWhy[stage] ?? 0) + 1;
+                },
               );
               if (sig3 != null &&
                   coins[i].quoteVolume <= MarketData.preferredVolume) {
@@ -3764,7 +3776,8 @@ class _HS extends State<HomeScreen> {
                     tr = 'bear';
                   }
                 }
-                quiet3 = _Quiet(sym, px3 > 0 ? a3 / px3 * 100 : 0, tr);
+                quiet3 = _Quiet(sym, px3 > 0 ? a3 / px3 * 100 : 0, tr,
+                    why: _scalp3mWhyWord(refused));
               }
               _scratch[i] = _CoinOut(sig3, null, quiet3);
             } else {
@@ -4239,6 +4252,32 @@ class _HS extends State<HomeScreen> {
   ///
   /// The stage with the highest count is named first, with its own number, so
   /// the sentence changes as the market changes instead of repeating a guess.
+  /// One refusal stage -> the words the row and the header both use.
+  ///
+  /// Kept in one place because the two were allowed to drift once already: the
+  /// header said "gate" while the rows showed a trend, and the screen
+  /// contradicted itself in two languages at once.
+  String _scalp3mWhyWord(String? stage) {
+    switch (stage) {
+      case 'gate':
+        return 'quiet';
+      case 'trend':
+        return 'no trend';
+      case 'side':
+        return 'no pullback';
+      case 'rsi':
+        return 'no rsi';
+      case 'bar':
+        return 'no turn';
+      case 'stop':
+        return 'stop too tight';
+      case 'data':
+        return 'short history';
+      default:
+        return '';
+    }
+  }
+
   String _scalp3mWhyMessage() {
     if (_scalp3mWhy.isEmpty) {
       return '${_total} coin check kora hoise';
@@ -4595,9 +4634,15 @@ class _HS extends State<HomeScreen> {
           children: <Widget>[
             const Divider(color: K.line, height: 1),
             const SizedBox(height: 10),
+            // The count used to print `_quiets.length` (all coins) above a
+            // list capped at 40, and in the 3M mode it named the wrong reason
+            // for every row at once. It now counts what is on screen and says
+            // the range when the list is capped.
             Text(
               _mode.isScalp3m
-                  ? '${_quiets.length} coin analyse kora hoise, signal pay nai'
+                  ? '${_quietShown.length}'
+                      '${_quiets.length > _quietShown.length ? ' / ${_quiets.length}' : ''}'
+                      ' coin analyse kora hoise, signal pay nai'
                   : '${_quiets.length} coin-e setup nei '
                       '(beshi move kora age)',
               style: const TextStyle(
@@ -4606,10 +4651,10 @@ class _HS extends State<HomeScreen> {
             const SizedBox(height: 3),
             Text(
               _mode.isScalp3m
-                  ? 'Upore ATR ${Engine.scalp3mGate.toStringAsFixed(2)}%-er '
-                      'guloteo rule mile nai (trend/pullback/candle turn). '
-                      'Baki gulote ATR-i kom — fee '
-                      '${kCostPct.toStringAsFixed(2)}% uthano jabe na.'
+                  ? 'Prottek coin-e EMAs, ATR ar candle turn check kora hoise. '
+                      'Por-er line-e je condition e atkeche setai lekha — '
+                      '"quiet" mane ATR ${Engine.scalp3mGate.toStringAsFixed(2)}%-er '
+                      'niche, fee ${kCostPct.toStringAsFixed(2)}% uthano jabe na.'
                   : 'Egulo analyse kora hoise but kono setup pay nai. '
                       'Kom move korche, tai niche.',
               style: const TextStyle(color: K.muted, fontSize: 10, height: 1.4),
@@ -4632,9 +4677,23 @@ class _HS extends State<HomeScreen> {
                     fontWeight: FontWeight.bold),
               ),
             ),
+            // The stage that refused the coin, in the gap that used to be
+            // empty. `Expanded` (not Spacer + Expanded) because two flexible
+            // children in one row fight over the same free space.
             Expanded(
+              child: Padding(
+                padding: const EdgeInsets.only(left: 6),
+                child: Text(
+                  q.why,
+                  style: const TextStyle(color: K.muted, fontSize: 9),
+                ),
+              ),
+            ),
+            SizedBox(
+              width: 34,
               child: Text(
                 q.trend,
+                textAlign: TextAlign.right,
                 style: TextStyle(
                     color: q.trend == 'bull'
                         ? K.green

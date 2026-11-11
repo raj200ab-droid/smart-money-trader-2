@@ -74,6 +74,10 @@ def main():
         sections = src
         check('scalp3m is a TradeMode', 'scalp3m;' in sections)
         check('scan calls Engine.scalp3m', 'Engine.scalp3m(' in src and 'w15,' in src)
+        # The copy checks below read source only, so a missing kline cache must
+        # not skip them -- that is exactly how a false sentence survived to the
+        # device for a release.
+        _copy_checks(src)
         print()
         if fails:
             print(f'{len(fails)} FAILED: {fails}')
@@ -169,6 +173,9 @@ def main():
     check('quiet rows use Wilder ATR like the gate',
           'final a3 = Engine.atrWilder(w15, period: 14);' in src)
 
+    print('6. the empty screen and the rows underneath tell the same story')
+    _copy_checks(src)
+
     print()
     if fails:
         print(f'{len(fails)} FAILED: {fails}')
@@ -177,5 +184,35 @@ def main():
     return 0
 
 
+def _copy_checks(main_src):
+    """Source-only checks, so they run with or without a kline cache.
+
+    v18.2 on the device: header "400 coin gate-e atke nai" over rows reading
+    "BTTC bear 2.24%/bar" -- the header claimed every coin died at the fee gate
+    while the rows showed coins with ATR twice the gate and a real trend. The
+    header printed a number the code never computed, and the rows printed a
+    fact that had nothing to do with the refusal.
+    """
+    check('each quiet row carries its refusal stage',
+          'why: _scalp3mWhyWord(refused)' in main_src)
+    check('the refusal is captured at scan time',
+          'refused = stage;' in main_src)
+    check('rows render the refusal', 'q.why' in main_src)
+    check('header counts what is on screen, not the whole list',
+          "'${_quietShown.length}'" in main_src)
+    check('header says the range when capped',
+          '_quiets.length > _quietShown.length' in main_src)
+    check('the old false claim is gone', 'gate-e atke nai' not in main_src)
+    check('one word list feeds header and rows', '_scalp3mWhyWord' in main_src)
+    # Every stage the engine can report must have words, or the row renders
+    # blank. Scoped to the WORD function: the stage names also appear in the
+    # header's own switch, so a global search would pass even if the row
+    # function were empty.
+    i = main_src.find('String _scalp3mWhyWord(')
+    j = main_src.find('String _scalp3mWhyMessage(', i)
+    words = main_src[i:j] if i != -1 and j > i else ''
+    check('the word function exists', bool(words))
+    for st in ['gate', 'trend', 'side', 'rsi', 'bar', 'stop', 'data']:
+        check(f'stage {st} has words in the row list', f"case '{st}':" in words)
 if __name__ == '__main__':
     sys.exit(main())

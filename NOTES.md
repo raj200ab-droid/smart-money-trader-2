@@ -1783,3 +1783,72 @@ Two of the three bugs were only found by reproducing the *generated* file
 locally — the template has changed shape since the notes in `tool/` were
 written. A patch step against generated code needs a fixture of that generated
 code, which is why `test_gemini.py` group 8 renders both templates.
+
+## §34 · v18.5.0 — the quiet list stops contradicting itself (2026-11-11)
+
+**Reported from a v18.2.0 device screenshot**, 3M S mode, 400/400 scanned, zero signals:
+
+```
+400 coin gate-e atke nai (beshi move kora age)
+Egulo analyse kora hoise but 3M scalp rule pay nai. ATR 0.80%-er kom hole
+fee uthano jay na, tai skip.
+
+INIT    flat    3.81%/bar
+IQ      bear    3.17%/bar
+BTTC    flat    2.78%/bar
+...
+OPG     bull    0.60%/bar
+```
+
+Two sentences, both false, both on the same screen:
+
+1. **"gate-e atke nai"** — of the 19 rows visible in the screenshot, **10 have
+   ATR above the 0.80% gate** (3.81, 3.17, 2.78, 2.47, 2.28, 1.72, 1.49, 1.14,
+   0.89, 0.81). They passed the gate and were refused later — trend, pullback,
+   RSI, candle turn or stop. The header named one stage for all 400 coins.
+2. **"400 coin"** — the list is capped at `_quietShown` = 40. The header counted
+   `_quiets.length`, the rows printed `_quietShown`. The number above the list
+   was not the number of rows in the list.
+
+The rows were also unreadable as evidence: `INIT flat 3.81%/bar` states a trend
+and a volatility and nothing about *why* a coin moving 3.8% a bar produced no
+trade. That is the question the screen exists to answer, and the answer was
+already computed and thrown away — `Engine.scalp3m` reports its refusing stage
+through `onRefuse`, the scan increments `_scalp3mWhy[stage]`, and the code then
+constructed `_Quiet` without it.
+
+**Fix.** `_Quiet` carries `why`; the scan captures the stage it was already
+counting and maps it through one word list (`_scalp3mWhyWord`: quiet / no trend /
+no pullback / no rsi / no turn / stop too tight / short history) used by the
+rows, while the header stops printing a count it did not measure:
+
+```
+19 / 400 coin analyse kora hoise, signal pay nai
+Prottek coin-e EMAs, ATR ar candle turn check kora hoise. Por-er line-e je
+condition e atkeche setai lekha — "quiet" mane ATR 0.80%-er niche ...
+
+INIT     no turn    flat    3.81%/bar
+IQ       no turn    bear    3.17%/bar
+BTTC     no turn    flat    2.78%/bar
+PARTI    quiet      bear    0.62%/bar
+```
+
+**Why this mattered more than it looks.** A mode that gives no signals is
+already asking the user to trust a refusal. A refusal that is described wrongly
+is worse than no description: it invites the reader to conclude the filter is
+broken, when the filter is working exactly as measured (the ATR gate really did
+eat most of the market — just not all of it, and not those ten coins).
+
+**Still not fixed, needs a decision.** Ten coins with 0.8–3.8% ATR bars passed
+the fee gate and still produced nothing on the same close. The next stage that
+refuses them is `side`/`rsi`/`bar` — and `side` (price not pulled back to EMA21)
+is structurally the most common, because a coin that just ran is above its EMA.
+So the screen will now honestly show a wall of "no pullback". Whether that means
+the *entry* is too strict for a 3M chart, or the mode is simply selective, is a
+measurement question — and the answer is not "loosen it": dropping the turn rule
+measured **+117.2% → −77.3%** over ten months. If the pullback wall is what
+actually bites, the honest options are (a) label these near-misses as
+non-tradeable, or (b) test a chase entry as a *separate* rule set with its own
+measurement, never as a relaxation of this one.
+
+### §34 · Shipped

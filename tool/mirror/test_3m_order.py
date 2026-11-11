@@ -53,8 +53,12 @@ def main():
     # branch. Both cap and sort the list the same way.
     check('quiet coins collected in single3m',
           'if (sig == null &&' in src and '_mode == TradeMode.single3m' in src)
+    # v18.5 adds the refusal stage to the row, so the constructor gained a
+    # named argument. Pin the parts that matter: the coin, the Wilder ATR (the
+    # same one the gate used) and the stage.
     check('quiet coins collected in scalp3m',
-          'quiet3 = _Quiet(sym, px3 > 0 ? a3 / px3 * 100 : 0, tr);' in src)
+          'quiet3 = _Quiet(sym, px3 > 0 ? a3 / px3 * 100 : 0, tr,' in src
+          and 'why: _scalp3mWhyWord(refused)' in src)
 
     # v18.4 puts an optional Gemini note above everything, which shifts the
     # index every section uses. The invariant worth pinning is the ORDER:
