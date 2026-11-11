@@ -31,6 +31,7 @@ jobs:
           python3 tool/mirror/test_3m_order.py
           python3 tool/mirror/test_3m_scalp.py
           python3 tool/mirror/test_gemini.py
+          python3 tool/mirror/test_3m_parity.py
 
       - name: Create Android Project
         run: |

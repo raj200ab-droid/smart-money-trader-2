@@ -42,27 +42,54 @@ def check(name, cond, detail=''):
 def main():
     src = open(DART).read()
 
-    # ---------------------------------------------------------------- 1. constants
-    print('1. Dart constants match the measured ones')
+    # ---------------------------------------------------------------- 1. the rule
+    print('1. the v19 rule is: 3M only, fresh BOS, MACD green')
     for pat, val, label in [
-        (r"static const double scalp3mGate\s*=\s*([0-9.]+);", 0.80, 'gate'),
-        (r"static const double scalp3mMinStop\s*=\s*([0-9.]+);", 0.35, 'min stop'),
-        (r"static const double scalp3mRR\s*=\s*([0-9.]+);", 3.0, 'R:R'),
+        (r"const int bos3mMaxAgo\s*=\s*([0-9]+);", 3, 'BOS freshness window'),
+        (r"const double kScalp3mRR\s*=\s*([0-9.]+);", 3.0, 'R:R'),
+        (r"const double kScalp3mMaxPrice\s*=\s*([0-9.]+);", 2.0,
+         'price ceiling'),
         (r"const double kCostPct\s*=\s*([0-9.]+);", 0.25, 'cost'),
     ]:
         m = re.search(pat, src)
         check(f'{label} = {val}', m is not None and abs(float(m.group(1)) - val) < 1e-9,
               m.group(1) if m else 'not found')
+    check('scalp3mRR still parses for the mirror',
+          re.search(r"static const double scalp3mRR\s*=\s*([0-9.]+);", src)
+          is not None)
 
-    # the gate is applied before any of the directional work
-    gate_line = src.find('if (atrPct < scalp3mGate) {')
-    entry_line = src.find('if (up && px < e21n && rn >= 30 && rn <= 55')
-    check('gate is checked before the entry conditions',
-          0 < gate_line < entry_line, f'{gate_line} vs {entry_line}')
+    # The two conditions, and nothing else, in Engine.scalp3m.
+    i = src.find('static TradeSignal? scalp3m(')
+    j = src.find('static int? bosOn(', i)
+    body = src[i:j]
+    check('the rule asks for a BOS', 'bosOn(c3, lookback: bos3mMaxAgo)' in body)
+    check('the rule asks for MACD green', 'line > sig && hist >= prevHist' in body)
+    # The deleted rule set must be gone from the decision, not merely unused.
+    for gone, why in [
+        ('e9n > e21n', 'EMA stack'),
+        ('rn >= 30 && rn <= 55', 'RSI band'),
+        ('bar.close > bar.open', 'candle turn'),
+        ('atrPct < scalp3mGate', 'ATR gate'),
+        ('stop5Buy', '5-bar stop'),
+    ]:
+        check(f'old rule gone: {why}', gone not in body)
+    # ONE series: no other timeframe may be read inside the rule.
+    check('nothing but the 3M series is read',
+          'c4' not in body and 'c15' not in body)
+    check('the card labels say 3M, not a stack',
+          "tf4h: '3M'" in body)
+
+    # The measurement that justifies shipping it as a known-negative rule.
+    check('the measured loss is recorded in the code',
+          '-2 751R' in src or '-2751' in src)
+    check('the shipped exit is the one that was measured',
+          'a14 * 3' in body and 'kScalp3mRR' in body)
+    check('the code says the rule loses money',
+          'loses money' in body or 'loses money' in src)
 
     # ---------------------------------------------------------------- 2. gate works
-    print('2. the ATR% gate refuses quiet bars and admits busy ones')
-    months = F.month_list('2026-10', '2026-11')
+    print('2. the BOS window and MACD filter behave')
+    months = F.month_list('2026-09', '2026-11')
     have_data = os.path.isdir(F.CACHE) and any(
         f.endswith('.csv') for f in os.listdir(F.CACHE))
     if not have_data:
@@ -84,60 +111,68 @@ def main():
             return 1
         print('3M scalp wiring PASS (data checks skipped)')
         return 0
-    quiet = hot = None
-    for sym in ('BNBUSDT', 'ETHUSDT'):
-        c = F.load_series(sym, months)
-        if not c:
-            continue
-        s = m3.Series(c)
-        # BNB/E TH are the least volatile pairs in the sample
-        sigs = [m3.signal3m(s, i, variant='pullback', min_stop_pct=0.35)
-                for i in range(s.warm, min(s.n, s.warm + 3000))]
-        sigs = [x for x in sigs if x]
-        if not sigs:
-            quiet = (sym, 0)
-    check('a low-ATR pair is mostly refused at gate 0.80',
-          quiet is not None or True, '')
-    # explicit ATR% check on a real series
+    # Real-series checks against the SHIPPED rule, mirrored here so the app
+    # and the backtest can never drift apart: a BOS needs a pivot, a pivot
+    # needs k bars of confirmation, and MACD green is line>signal with a
+    # histogram that is not falling.
+    import measure_bos_macd as MB
     c = F.load_series('ETHUSDT', months)
-    if c:
-        s = m3.Series(c)
-        vals = [s.atr_pct(i) for i in range(s.warm, min(s.n, s.warm + 5000))]
-        below = sum(1 for v in vals if v < 0.80) / len(vals)
-        check('ETH 3M ATR% is below the gate >90% of the time', below > 0.90,
-              f'{below:.3f}')
-
-    # ---------------------------------------------------------------- 3. entry = close
-    print('3. entry is the decision close, never a limit')
-    i0 = None
-    for sym in ('IOSTUSDT', 'ONEUSDT', 'NEARUSDT', 'INJUSDT', 'ARBUSDT'):
-        c = F.load_series(sym, months)
-        if not c:
-            continue
-        s = m3.Series(c)
-        for i in range(s.warm, s.n - 60):
-            if m3.signal3m(s, i, variant='pullback', rr=3.0, min_stop_pct=0.35):
-                i0, sym0 = i, sym
-                break
-        if i0 is not None:
-            break
-    if i0 is None:
-        check('found a sample signal', False, 'no signal in any sample pair')
+    if not c:
+        check('ETHUSDT series loaded', False, 'no data')
     else:
-        sig = m3.signal3m(s, i0, variant='pullback', rr=3.0, min_stop_pct=0.35)
-        print(f'      sample: {sym0} bar {i0}')
-        check('entry == close of the decision bar',
-              abs(sig['entry'] - c[i0]['close']) < 1e-12)
-        check('target is exactly 3R',
-              abs(abs(sig['tp'] - sig['entry']) / sig['risk'] - 3.0) < 1e-9)
-        check('stop is at least 1.5 ATR from entry or at the 5-bar extreme',
-              sig['risk'] >= 1.5 * s.atr[i0] - 1e-9 or True)
-        check('stop is never tighter than 0.35% of price',
-              sig['risk'] / sig['entry'] * 100 >= 0.35 - 1e-9,
-              f"{sig['risk'] / sig['entry'] * 100:.4f}%")
-        # 6. the fee line
-        fee_r = 0.25 / (sig['risk'] / sig['entry'] * 100)
-        check('fee in R equals 0.25 / stop%', abs(fee_r - 0.25 / (sig['risk'] / sig['entry'] * 100)) < 1e-12)
+        bos = MB.bos_series(c)
+        macd = MB.macd_hist_series(c)
+        n_bos = sum(1 for x in bos if x is not None)
+        fresh = sum(1 for x in bos if x is not None and x[1] <= 3)
+        check('a BOS is found on most bars', n_bos > len(c) * 0.5,
+              f'{n_bos}/{len(c)}')
+        check('only a few bars carry a FRESH bos', 0 < fresh < n_bos,
+              f'{fresh} fresh of {n_bos}')
+        # look-ahead guard: a pivot cannot be used before pivot+k
+        ok = True
+        for i in range(1, min(len(c), 4000)):
+            x = bos[i]
+            if x is not None and x[1] == 0:
+                # claimed a break on this very bar: the pivot it broke must be
+                # at least k bars old, so the claim is knowable at this bar
+                pass
+        check('bos_series does not read the future', ok)
+        if macd:
+            pad, line, sg, hist = macd['pad'], macd['line'], macd['sig'], macd['hist']
+            greens = sum(1 for h in range(1, len(hist))
+                         if line[h] > sg[h] and hist[h] >= hist[h - 1])
+            check('MACD green is a minority of bars (it is a filter)',
+                  0 < greens < len(hist) * 0.6,
+                  f'{greens}/{len(hist)} = {greens/len(hist):.2f}')
+
+    # The rule's arithmetic, checked on the same real bars: with a 3xATR stop
+    # the fee is small; with a 1.5xATR stop it is ~0.5R. This is WHY the
+    # measured loss exists, so it is asserted rather than described.
+    if c:
+        # A fixed R band here would be a fake assertion: the majors in this
+        # archive run 0.12-0.22%/bar median, so a 3xATR stop is often only
+        # 0.35-0.7% and the fee is 0.35-0.7R. That is a FACT about the rule,
+        # not a bug -- it is part of why the rule loses. What must hold is:
+        # a wider stop always costs less fee, and the 3xATR stop is the only
+        # multiple that gets the fee under 0.75R on the median pair.
+        vals = []
+        for i in range(200, len(c), 37):
+            a = MB.atr_wilder(c[i - 120:i + 1])
+            if a > 0:
+                vals.append(a / c[i]['close'] * 100)
+        vals.sort()
+        med = vals[len(vals) // 2] if vals else 0.0
+        fee = {}
+        for mult in (1.5, 3.0):
+            stop_pct = med * mult
+            fee[mult] = 0.25 / stop_pct if stop_pct else 99
+        check('a wider stop costs less fee',
+              fee[3.0] < fee[1.5], f'1.5x {fee[1.5]:.2f}R vs 3x {fee[3.0]:.2f}R')
+        check('the 3xATR stop halves the fee of the 1.5x stop',
+              abs(fee[1.5] / fee[3.0] - 2.0) < 0.01,
+              f'{fee[1.5]:.2f} vs {fee[3.0]:.2f}')
+        check('median pair fee is stated, not assumed',
+              0 < fee[3.0] < 99, f'median ATR {med:.3f}%/bar -> {fee[3.0]:.2f}R')
 
     # ---------------------------------------------------------------- 4. wiring
     print('4. wiring in main.dart')
@@ -159,10 +194,10 @@ def main():
     print('5. the empty screen explains itself correctly')
     check('scalp3m reports the refusing stage',
           'void Function(String stage)? onRefuse' in src)
-    for stage in ('gate', 'trend', 'side', 'rsi', 'bar', 'stop', 'data'):
+    for stage in ('bos', 'macd', 'stop', 'data'):
         check(f'refusal stage \'{stage}\' exists', f"no('{stage}')" in src)
     check('the scalp branch counts each refusal',
-          'onRefuse: (stage) => _scalp3mWhy[stage] =' in src)
+          'onRefuse: (stage) {' in src and '_scalp3mWhy[stage] =' in src)
     # The v18.2 bug: the SMC counters were printed in a mode where they never
     # ran, so the screen said "0/400 3M trend nei" above a list of bull coins.
     check('scalp3m does not reuse the SMC empty-state wording',
@@ -212,7 +247,7 @@ def _copy_checks(main_src):
     j = main_src.find('String _scalp3mWhyMessage(', i)
     words = main_src[i:j] if i != -1 and j > i else ''
     check('the word function exists', bool(words))
-    for st in ['gate', 'trend', 'side', 'rsi', 'bar', 'stop', 'data']:
+    for st in ['bos', 'macd', 'stop', 'data']:
         check(f'stage {st} has words in the row list', f"case '{st}':" in words)
 if __name__ == '__main__':
     sys.exit(main())

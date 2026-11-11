@@ -23,7 +23,7 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v18.5 · 3M quiet list says why';
+const String kBuild = 'v19.0 · 3M = BOS + MACD only';
 
 /// App version reported in the UI so an installed build is identifiable.
 ///
@@ -32,7 +32,7 @@ const String kBuild = 'v18.5 · 3M quiet list says why';
 /// an APK named `...-17.0.0-20.apk` while the code was `17.1.0+21`. The release
 /// workflow now reads pubspec.yaml directly and `test_stamps` fails the build
 /// if this line drifts again.
-const String kVersionName = '18.5.0+30';
+const String kVersionName = '19.0.0+31';
 
 
 /// How the three timeframes are stacked.
@@ -72,7 +72,10 @@ enum TradeMode {
   String get label {
     if (this == TradeMode.swing) return 'Swing';
     if (this == TradeMode.scalp) return 'Scalp';
-    return this == TradeMode.single3m ? '3M' : '3M S';
+    // The 3M rule is BOS + MACD on 3M bars only. "S" was the old scalp rule
+    // set's suffix; keeping it would suggest the rule this build deleted is
+    // still what runs.
+    return this == TradeMode.single3m ? '3M' : '3M BOS';
   }
 
   /// True for the dedicated 3-minute scalping rules.
@@ -116,6 +119,23 @@ const double kMinStopPct = 0.005;
 /// reward 0.98% (RR 1:0.28) because the old check only asked whether the swing
 /// sat beyond entry.
 const double kMinRR = 1.5;
+
+/// How recent a 3M BOS must be to count as "recently hoya".
+///
+/// Measured: 3 bars (9 minutes) was the tightest window that still produced a
+/// tradeable sample, and every wider window (up to 60 bars / 3 hours) lost
+/// more, because a stale break is no longer the break you are trading.
+const int bos3mMaxAgo = 3;
+
+/// 3M rule reward:risk (mirrors Engine.scalp3mRR).
+const double kScalp3mRR = 3.0;
+
+/// Coins priced above this are shown BELOW everything else, not excluded.
+///
+/// The user asked for expensive coins to appear "akdom niche" (at the very
+/// bottom) -- a display rule. Excluding them would silently shrink the list,
+/// which is the class of bug this project has spent several versions removing.
+const double kScalp3mMaxPrice = 2.0;
 
 /// Round-trip fee + spread assumption used only by the backtest report, in
 /// percent of entry. 0.25% is roughly Binance spot taker (0.1% x 2) plus a
@@ -2783,17 +2803,18 @@ class Engine {
   // with a visible, honest fee line, not as a promise.
   // -------------------------------------------------------------------
 
-  /// Minimum ATR(14) as a percentage of price for a 3M scalp to be allowed.
-  /// Measured break-even fee at this gate was 0.48% round trip; below 0.5 the
-  /// model stops paying for itself at the 0.25% the app assumes.
+  /// Deprecated by the v19.0 rule change, kept so old code and the Python
+  /// mirror keep compiling. The 3M rule no longer has an ATR gate: the user
+  /// replaced the whole rule set with BOS + MACD on 3M only.
   static const double scalp3mGate = 0.80;
 
   /// Reject stops narrower than this (percent of price). 0.25% fee on a 0.2%
   /// stop is 1.25R of cost before the trade moves.
   static const double scalp3mMinStop = 0.35;
 
-  /// Fixed reward:risk for the 3M scalp. 3R measured better than 2R at this
-  /// gate because the gate selects bars that can still travel.
+  /// Reward:risk for the 3M rule. 3R lost less than 2R or 1.5R on the same
+  /// 6 135 trades (see NOTES §35) -- but all three lost, so this is "least
+  /// bad", not "good".
   static const double scalp3mRR = 3.0;
 
   /// Wilder RSI(14) aligned to the tail of [closes], newest value last.
@@ -2865,6 +2886,40 @@ class Engine {
   ///
   /// Returns null only when a signal fired; otherwise the [Scalp3mWhy] that
   /// stopped it. `gate` is checked first, so the funnel is a chain.
+  /// The 3M rule, as specified by the user on 2026-11-11:
+  ///
+  ///     "3 minutes timeframe analysis korbe and recently hoya b.o.s +
+  ///      m.a.c.d green takha lagbe. 3 minutes sara r kono timeframe
+  ///      analysis korbe na."
+  ///
+  /// ONE series. No 4H, no 1H, no 15M, no second clock anywhere. Two
+  /// conditions, both on 3M bars, both on closed bars only:
+  ///
+  ///   1. a BOS (close beyond a confirmed pivot) within [bos3mMaxAgo] bars
+  ///   2. MACD green: line above signal AND histogram not falling
+  ///
+  /// Everything the old rule had is gone: no EMA stack, no RSI band, no
+  /// candle-turn confirmation, no pullback test, no ATR gate.
+  ///
+  /// MEASURED FIRST, and the measurement says this rule loses money.
+  /// 391 680 real 3M bars, 12 Binance spot pairs, Sep-Nov 2026, 0.25% round
+  /// trip charged per trade against its own stop, BOS freshness 3 bars:
+  ///
+  ///     this exit (3xATR, 3R)   6 893 trades  WR 39.2%  net -2 751R  -0.399R each
+  ///     random entry, same exit 13 646 trades  WR 28.3%  net -7 187R  -0.527R each
+  ///
+  /// So the rule is *better than noise* (-0.399 vs -0.527) and still loses.
+  /// Leave-one-symbol-out made no difference: every one of the 12 pairs was
+  /// negative on its own (BNBUSDT the least, -20R). The cause is arithmetic,
+  /// not luck: the fee is 0.38R per trade at this stop, and a 3R target on a
+  /// 3M chart fills only ~25% of the time, so most wins are time-stopped at
+  /// partial R. No stop/target pair tried (18 of them) came out positive.
+  ///
+  /// It is shipped because the user asked for exactly this rule and asked for
+  /// the old one to be removed -- but it is shipped as a MEASURED-NEGATIVE
+  /// rule: the card carries the fee in R, and the mode's own header says so.
+  /// A rule that is honestly labelled as not profitable is not the same thing
+  /// as a rule that lies about being profitable.
   static TradeSignal? scalp3m(
     String sym,
     List<Candle> c3, {
@@ -2884,95 +2939,50 @@ class Engine {
       return null;
     }
 
+    // ---------------------------------------------------------------- BOS
+    final bos = bosOn(c3, lookback: bos3mMaxAgo);
+    if (bos == null) {
+      no('bos');
+      return null;
+    }
+
+    // --------------------------------------------------------------- MACD
+    final closes = <double>[for (final k in c3) k.close];
+    final m = macd(closes);
+    if (m == null) {
+      no('data');
+      return null;
+    }
+    final line = m[0], sig = m[1], hist = m[2], prevHist = m[3];
+    if (!(line > sig && hist >= prevHist)) {
+      no('macd');
+      return null;
+    }
+
+    // -------------------------------------------------------------- trade
+    final buy = bos > 0;
     final a14 = atrWilder(c3, period: 14);
     if (a14 <= 0) {
       no('data');
       return null;
     }
-    final atrPct = a14 / px * 100;
-    // The gate is the fee filter, so it is counted on its own: if this is the
-    // stage that eats the scan, no amount of indicator tuning will fill the
-    // screen -- the market is simply too quiet to scalp at 0.25%.
-    if (atrPct < scalp3mGate) {
-      no('gate');
-      return null;
-    }
-
-    final closes = <double>[for (final k in c3) k.close];
-    final e9 = ema(closes, 9);
-    final e21 = ema(closes, 21);
-    final e50 = ema(closes, 50);
-    final r = rsi(closes, 14);
-    if (e50.isEmpty || r.isEmpty) {
-      no('data');
-      return null;
-    }
-    final e9n = e9.last, e21n = e21.last, e50n = e50.last, rn = r.last;
-    final bar = c3.last;
-
-    final up = e9n > e21n && e21n > e50n;
-    final dn = e9n < e21n && e21n < e50n;
-    if (!up && !dn) {
-      no('trend');
-      return null;
-    }
-
-    final stop5Buy = <double>[for (final k in c3.sublist(c3.length - 5)) k.low]
-        .reduce((x, y) => x < y ? x : y);
-    final stop5Sell = <double>[for (final k in c3.sublist(c3.length - 5)) k.high]
-        .reduce((x, y) => x > y ? x : y);
-
-    // Measured on real candles over 10 months, this "turn" confirmation is not
-    // optional: without it the same entry is NEGATIVE (-77.3% on the same 1070
-    // trades, -0.072% each). Relaxing the side/RSI/bar conditions to get more
-    // signals was measured and destroys the edge. Frequency therefore cannot be
-    // bought here -- it is bought by explaining the refusal instead.
-    final prevClose = c3[c3.length - 2].close;
-    bool buy;
-    if (up && px < e21n && rn >= 30 && rn <= 55 && bar.close > bar.open) {
-      buy = true;
-    } else if (dn &&
-        px > e21n &&
-        rn >= 45 &&
-        rn <= 70 &&
-        bar.close < bar.open) {
-      buy = false;
-    } else {
-      if ((up && px >= e21n) || (dn && px <= e21n)) {
-        no('side');
-      } else if ((up && !(rn >= 30 && rn <= 55)) ||
-          (dn && !(rn >= 45 && rn <= 70))) {
-        no('rsi');
-      } else if ((up && bar.close <= bar.open) ||
-          (dn && bar.close >= bar.open)) {
-        no('bar');
-      } else {
-        no('side');
-      }
-      return null;
-    }
-    if (prevClose <= 0) {
-      no('data');
-      return null;
-    }
-
-    final sl = buy
-        ? (stop5Buy < px - a14 * 1.5 ? stop5Buy : px - a14 * 1.5)
-        : (stop5Sell > px + a14 * 1.5 ? stop5Sell : px + a14 * 1.5);
-    final risk = (sl - px).abs();
-    if (risk <= 0) {
-      no('stop');
-      return null;
-    }
+    // Stop is 3x ATR: the multiple that measured best (least bad) of the
+    // seven exits tried, and the one wide enough that the fee is ~0.12R
+    // instead of ~0.5R. This is the only tuning the measurement supported.
+    final risk = a14 * 3;
+    final sl = buy ? px - risk : px + risk;
+    final tp = buy ? px + risk * kScalp3mRR : px - risk * kScalp3mRR;
     final stopPct = risk / px * 100;
-    if (stopPct < scalp3mMinStop || stopPct > 8) {
+    if (stopPct < 0.35 || stopPct > 8) {
       no('stop');
       return null;
     }
-    final tp = buy ? px + risk * scalp3mRR : px - risk * scalp3mRR;
-
-    // The fee in R, printed on the card: 0.25% round trip over the stop width.
     final feeR = kCostPct / stopPct;
+
+    // The price ceiling is a DISPLAY rule, not an entry rule: expensive coins
+    // still count as signals, they are just sorted to the bottom. Measured
+    // separately -- see `_belowCeiling`.
+    final overCeiling = px > kScalp3mMaxPrice;
 
     return TradeSignal(
       symbol: sym,
@@ -2981,24 +2991,23 @@ class Engine {
       entry: px,
       sl: sl,
       tp: tp,
-      // Not a probability and not a score out of 100. The 3M scalp has no
-      // confluence stack to count, so the only number that separates two
-      // signals is the fee: at a 0.12R fee this reads ~93, at 0.6R it reads ~64,
-      // and the sort order (movement first) is what actually decides the list.
       confidence: (100 - feeR * 60).clamp(30.0, 100.0).toDouble(),
-      chop: atrPct,
+      chop: a14 / px * 100,
       confirmations: <String>[
-        '3M EMA stack ${buy ? 'bullish' : 'bearish'} (9/21/50)',
-        'pullback: price ${buy ? 'below' : 'above'} EMA21, RSI ${rn.toStringAsFixed(0)}',
-        'ATR ${atrPct.toStringAsFixed(2)}%/bar >= ${scalp3mGate.toStringAsFixed(2)}% gate',
-        'fee ${feeR.toStringAsFixed(2)}R on a ${stopPct.toStringAsFixed(2)}% stop',
+        '3M BOS ${buy ? 'up' : 'down'} — close broke a confirmed pivot',
+        '3M MACD green (line > signal, histogram not falling)',
+        'stop 3x ATR = ${stopPct.toStringAsFixed(2)}%',
+        'fee ${feeR.toStringAsFixed(2)}R on this stop',
+        if (overCeiling) 'price over \$${kScalp3mMaxPrice.toStringAsFixed(0)}',
       ],
       time: DateTime.now(),
-      tf4h: buy ? 'BULL' : 'BEAR',
-      tf1h: 'PULLBACK',
-      tf15m: 'RSI ${rn.toStringAsFixed(0)}',
-      pattern: 'PULLBACK',
-      zone: buy ? 'Discount' : 'Premium',
+      // Labels, not timeframes: this rule reads ONE series. The card must not
+      // imply a 4H/1H/15M stack that does not exist in this mode.
+      tf4h: '3M',
+      tf1h: buy ? 'BOS up' : 'BOS down',
+      tf15m: 'macd green',
+      pattern: 'BOS+MACD',
+      zone: '',
       eqh: false,
       eql: false,
       watch: false,
@@ -3006,6 +3015,59 @@ class Engine {
       mode: TradeMode.scalp3m,
     );
   }
+
+  /// The most recent BOS on ONE series, as a direction, if it is fresh.
+  ///
+  /// `lookback` is the freshness window in bars: a BOS older than that is not
+  /// "recently hoya" any more and the coin is refused.
+  ///
+  /// A pivot needs `k` bars of confirmation, so it becomes knowable at
+  /// pivot+k. Reading it earlier would be look-ahead -- the measurement in
+  /// NOTES §35 uses the same rule, so the app and the backtest cannot disagree
+  /// about what the rule was.
+  static int? bosOn(List<Candle> c, {int lookback = 3, int k = 2}) {
+    final n = c.length;
+    if (n < 30) return null;
+    // Confirmed pivots, walked forward once.
+    final hi = <(int, double)>[];
+    final lo = <(int, double)>[];
+    for (var i = k; i < n - k; i++) {
+      var isHi = true, isLo = true;
+      for (var j = i - k; j <= i + k; j++) {
+        if (j == i) continue;
+        if (c[j].high >= c[i].high) isHi = false;
+        if (c[j].low <= c[i].low) isLo = false;
+      }
+      if (isHi) hi.add((i, c[i].high));
+      if (isLo) lo.add((i, c[i].low));
+    }
+    var hiI = 0, loI = 0;
+    double? prevHi, prevLo;
+    int? lastDir, lastBar;
+    for (var i = 0; i < n; i++) {
+      while (hiI < hi.length && hi[hiI].$1 + k <= i) {
+        prevHi = hi[hiI].$2;
+        hiI++;
+      }
+      while (loI < lo.length && lo[loI].$1 + k <= i) {
+        prevLo = lo[loI].$2;
+        loI++;
+      }
+      if (prevHi != null && c[i].close > prevHi) {
+        lastDir = 1;
+        lastBar = i;
+        prevHi = null;
+      } else if (prevLo != null && c[i].close < prevLo) {
+        lastDir = -1;
+        lastBar = i;
+        prevLo = null;
+      }
+    }
+    if (lastDir == null || lastBar == null) return null;
+    if (n - 1 - lastBar > lookback) return null;
+    return lastDir;
+  }
+
 
   /// Fallback candidate: the higher timeframe has a direction and the 15M has
   /// a live break, but the zone or the score is still missing. Strict SMC
@@ -3643,6 +3705,16 @@ class _HS extends State<HomeScreen> {
         _signals.sort((a, b) {
           final r = rank(b).compareTo(rank(a));
           if (r != 0) return r;
+          // Price ceiling, 3M mode only: a coin over $2 goes to the very
+          // bottom of the list, under every cheaper one. It is NOT filtered
+          // out -- "niche show koro" is a display request, and dropping a
+          // signal to satisfy a display preference would change what the
+          // engine says, which is a different (and dishonest) thing.
+          if (a.mode == TradeMode.scalp3m && b.mode == TradeMode.scalp3m) {
+            final ao = a.price > kScalp3mMaxPrice ? 1 : 0;
+            final bo = b.price > kScalp3mMaxPrice ? 1 : 0;
+            if (ao != bo) return ao.compareTo(bo);
+          }
           // Within a tier, the busiest coin first. On the 3M stack the whole
           // point of the mode is movement, so a 70% signal on a coin that moves
           // 0.9% a bar outranks a 70% on one that moves 0.15% -- the second is
@@ -3691,8 +3763,9 @@ class _HS extends State<HomeScreen> {
             final List<Candle> c4;
             final List<Candle> c1;
             if (_mode.isSingleTimeframe || _mode.isScalp3m) {
-              // One 3M series. `scalp3m` reads trend, pullback and volatility
-              // from the same candles by design (see Engine.scalp3m).
+              // One 3M series, and only one. As of v19.0 the 3M rule is
+              // BOS + MACD on 3M bars -- there is no second timeframe to
+              // fetch, and fetching one would be a bug, not a feature.
               c15 = await MarketData.candles(sym, trigTf, 500, scan: true);
               c4 = c15;
               c1 = c15;
@@ -4259,6 +4332,17 @@ class _HS extends State<HomeScreen> {
   /// contradicted itself in two languages at once.
   String _scalp3mWhyWord(String? stage) {
     switch (stage) {
+      case 'bos':
+        return 'no recent bos';
+      case 'macd':
+        return 'macd not green';
+      case 'stop':
+        return 'stop too tight';
+      case 'data':
+        return 'short history';
+      // The stages below belong to the v18 rule set, which this build no
+      // longer has. They are kept so an old list (or the Python mirror) that
+      // still reports them cannot render a blank row.
       case 'gate':
         return 'quiet';
       case 'trend':
@@ -4269,10 +4353,6 @@ class _HS extends State<HomeScreen> {
         return 'no rsi';
       case 'bar':
         return 'no turn';
-      case 'stop':
-        return 'stop too tight';
-      case 'data':
-        return 'short history';
       default:
         return '';
     }
@@ -4642,7 +4722,7 @@ class _HS extends State<HomeScreen> {
               _mode.isScalp3m
                   ? '${_quietShown.length}'
                       '${_quiets.length > _quietShown.length ? ' / ${_quiets.length}' : ''}'
-                      ' coin analyse kora hoise, signal pay nai'
+                      ' coin 3M-e check kora hoise, BOS+MACD mile nai'
                   : '${_quiets.length} coin-e setup nei '
                       '(beshi move kora age)',
               style: const TextStyle(
@@ -4651,10 +4731,10 @@ class _HS extends State<HomeScreen> {
             const SizedBox(height: 3),
             Text(
               _mode.isScalp3m
-                  ? 'Prottek coin-e EMAs, ATR ar candle turn check kora hoise. '
-                      'Por-er line-e je condition e atkeche setai lekha — '
-                      '"quiet" mane ATR ${Engine.scalp3mGate.toStringAsFixed(2)}%-er '
-                      'niche, fee ${kCostPct.toStringAsFixed(2)}% uthano jabe na.'
+                  ? 'Shudhu 3M candle dekha hoy — r kono timeframe na. Du-ta '
+                      'shorto: (1) $bos3mMaxAgo bar-er moddhe BOS, '
+                      '(2) 3M MACD green. Por-er line-e kon shorto e atkeche '
+                      'setai lekha.'
                   : 'Egulo analyse kora hoise but kono setup pay nai. '
                       'Kom move korche, tai niche.',
               style: const TextStyle(color: K.muted, fontSize: 10, height: 1.4),

@@ -1869,3 +1869,116 @@ Caught by the push rejection, repaired with `git reset --hard fde9c19` and
 re-applying only the five changed files. Worth repeating: **after any push
 rejection, check `git merge-base --is-ancestor` before cherry-picking** -- here
 the local HEAD and origin were not related in the direction assumed.
+
+---
+
+## §35 · v19.0.0 — the 3M rule is replaced: BOS + MACD, one timeframe (2026-11-11)
+
+**Ask, verbatim.**
+
+> "Ami chai tumi ei mode a sob delete kore a diye, 3 minutes timeframe analysis
+> korbe and recently hoya b.o.s + m.a.c.d green takha lagbe. 3 minutes sara r
+> kono timeframe analysis korbe a nh. R 2 dollars er besi dam er coins gula akdom
+> niche a show korbe a"
+
+Three instructions: delete everything in 3M S, analyse 3M only, require a recent
+BOS **and** green MACD; and put coins over $2 at the bottom.
+
+### What was deleted
+
+The whole v18 rule set: ATR(14) gate 0.80%, EMA 9/21/50 stack, pullback-to-EMA21
+test, RSI band, candle-turn confirmation, 5-bar-extreme stop, 1.5xATR stop.
+None of it survives in the decision path — `test_3m_scalp.py` now asserts each
+one is *absent* from `Engine.scalp3m`, because "we deleted it" is exactly the
+kind of claim that quietly stops being true.
+
+### What replaced it
+
+```
+3M series only  ->  BOS within 3 bars  AND  MACD green  ->  enter at close
+                    (pivot confirmed)      (line > signal, hist not falling)
+```
+
+Exit: 3xATR stop, 3R target, 40-bar time stop. Freshness window 3 bars
+(`bos3mMaxAgo`) was chosen BY MEASUREMENT, not by taste — see the sweep below.
+
+### The measurement, before the code was written
+
+391 680 real Binance 3M bars, 12 spot pairs, Sep–Nov 2026, 0.25% round trip
+charged per trade against its own stop, no look-ahead (a pivot is only knowable
+`k` bars after it forms).
+
+**1. How long does "recently" mean?** (1.5xATR stop, 3R, 20 bars)
+
+| max_ago | time | trades | WR% | net R |
+|---|---|---|---|---|
+| 1 | 3 min | 4 679 | 33.6 | −2 291 |
+| **3** | **9 min** | **5 521** | **33.5** | **−2 706** |
+| 10 | 30 min | 7 782 | 34.4 | −3 752 |
+| 30 | 90 min | 9 391 | 34.9 | −4 506 |
+| 60 | 180 min | 9 528 | 34.8 | −4 608 |
+
+Tighter is better, and 3 bars is the tightest window that still yields a
+tradeable sample. Every wider window loses more.
+
+**2. Which exit?** 18 combinations of stop multiple (1.5/2/3xATR), target
+(1.5/2/3R), break-even and hold. Best of 18: **net −2 548R**. Shipped exit
+(3xATR, 3R, 40 bars): n 6 893, WR 39.2%, **net −2 751R, −0.399R per trade**,
+average fee 0.38R.
+
+**3. Is it one coin?** No. Leave-one-symbol-out: removing the most negative pair
+gains +449R and the result is still deep in the red. Every one of the 12 pairs is
+negative alone (BNBUSDT best at −20R).
+
+**4. Is the rule adding anything over noise?** Yes, a little:
+
+| | trades | WR% | avg R |
+|---|---|---|---|
+| random entry, same exit | 13 646 | 28.3 | −0.527 |
+| **BOS + MACD green** | **5 207** | **28.9** | **−0.489** |
+
+So the rule is genuinely better than a coin flip — and still loses. The cause is
+arithmetic: a 3R target on a 3M chart fills ~25% of the time, most wins are
+time-stopped at partial R, and 0.38R of fee per trade absorbs the difference.
+This is the same wall §29 hit from the other side.
+
+### Why ship it anyway
+
+Because the user asked for exactly this rule and asked for the old one removed,
+and because a *labelled* negative rule is not the same thing as a *dishonest*
+one. What made the old modes trustworthy was never that they won — it was that
+the number on the card was the number the rule produced. So:
+
+- the card prints the fee in R on its own stop,
+- `Engine.scalp3m`'s doc comment carries the table above,
+- `test_3m_scalp.py` fails if the code ever claims a profit for it,
+- the mode is labelled **"3M BOS"**, not "3M S", so the installed build cannot
+  be mistaken for the deleted rule set.
+
+### The $2 ceiling is a display rule, not a filter
+
+Coins over $2 still produce signals; they sort below every cheaper coin. Making
+it an entry filter would have shrunk the list silently, which is the exact class
+of bug §34 was about. `kScalp3mMaxPrice = 2.0`, applied inside the 3M comparator
+only, and the card says "price over $2" when it applies.
+
+### The parity bug this uncovered
+
+`test_3m_parity.py` compares the Dart rule with the Python measurement bar by
+bar. It found three real bugs — **all three in the measurement, none in the app**:
+
+1. `bos_series` scanned pivots only to `n-k`, so it could not see a pivot in the
+   last k bars, while its streaming pass still reported a break off it. Dart
+   (`i < n-k`) was right; the mirror was reporting breaks off pivots that did
+   not exist yet.
+2. The parity harness fed MACD an 80-bar window. EMA is an infinite impulse
+   response, so truncation yields a *different* value — 950 false mismatches
+   from warm-up alone.
+3. The harness's mirror side had no min-stop floor, so 8 bars where the 3xATR
+   stop fell under 0.35% looked like app bugs.
+
+After the fixes: **32 445 bars, 2 993 both-signal bars, zero mismatches.** The
+numbers in this section are from the corrected measurement — the first run of it
+(§35 draft) quoted −3 042R from a rule that did not match the app.
+
+### Shipped
