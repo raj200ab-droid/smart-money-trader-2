@@ -1997,12 +1997,18 @@ numbers in this section are from the corrected measurement — the first run of 
 and would have replaced the branch tip with a tree missing v18.4 and v18.5. Now
 caught by the push rejection each time, repaired with
 `git stash -u` → `git reset --hard origin/<branch>` → copy back the touched
-files. The reliable pre-commit check is one line:
+files. The reliable pre-commit check is one line, and the argument order matters:
 
-    git merge-base --is-ancestor HEAD origin/<branch> && echo ok
+    git merge-base --is-ancestor origin/<branch> HEAD && echo ok
 
-If that fails, do not commit — fix the base first. `git log --oneline -3` alone
-will not show it, because the stale base has a plausible-looking history.
+That asks "is the remote tip already inside my HEAD?", which is the healthy
+state. Written the other way round (`HEAD origin/<branch>`) it answers "yes" in
+the BROKEN case too — HEAD being an ancestor of origin is exactly what a stale
+working copy looks like — which is how the fourth occurrence of this went
+unnoticed for a whole turn. If the check fails, do not commit: `git stash -u`,
+`git reset --hard origin/<branch>`, copy the touched files back. `git log
+--oneline -3` alone will not show it, because the stale base has a
+plausible-looking history.
 
 **Records syntax.** `(int, double)` cost a CI run: this project targets a
 language version without the `records` feature. tree-sitter parses it happily;

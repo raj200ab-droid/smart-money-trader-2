@@ -23,7 +23,7 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v19.0 · 3M = BOS + MACD only';
+const String kBuild = 'v19.0.1 · 3x ATR explained';
 
 /// App version reported in the UI so an installed build is identifiable.
 ///
@@ -32,7 +32,7 @@ const String kBuild = 'v19.0 · 3M = BOS + MACD only';
 /// an APK named `...-17.0.0-20.apk` while the code was `17.1.0+21`. The release
 /// workflow now reads pubspec.yaml directly and `test_stamps` fails the build
 /// if this line drifts again.
-const String kVersionName = '19.0.0+31';
+const String kVersionName = '19.0.1+32';
 
 
 /// How the three timeframes are stacked.
@@ -2966,9 +2966,18 @@ class Engine {
       no('data');
       return null;
     }
-    // Stop is 3x ATR: the multiple that measured best (least bad) of the
-    // seven exits tried, and the one wide enough that the fee is ~0.12R
-    // instead of ~0.5R. This is the only tuning the measurement supported.
+    // Stop = 3 x ATR(14).
+    //
+    // ATR is the average size of one 3-minute bar, so "3xATR" means the stop
+    // sits three typical bars away from the entry: a trade only dies if price
+    // travels three normal candles against it. That is wide enough that the
+    // fixed 0.25% round-trip fee is a SMALLER fraction of the risk --
+    // fee in R = 0.25 / stop%, so a 0.66% stop pays 0.38R and a 0.35% stop
+    // pays 0.71R. (The 3x multiple was the best of the exits tested and is
+    // also the widest that still stays inside the 8% ceiling.)
+    //
+    // It does NOT make the trade cheap: the measured average fee on this exit
+    // is 0.38R, which is why the rule is documented as net-negative.
     final risk = a14 * 3;
     final sl = buy ? px - risk : px + risk;
     final tp = buy ? px + risk * kScalp3mRR : px - risk * kScalp3mRR;
