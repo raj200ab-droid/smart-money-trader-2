@@ -3029,8 +3029,15 @@ class Engine {
     final n = c.length;
     if (n < 30) return null;
     // Confirmed pivots, walked forward once.
-    final hi = <(int, double)>[];
-    final lo = <(int, double)>[];
+    //
+    // Two parallel lists rather than a list of records: this app builds on
+    // Flutter 3.16 with the project's language version, where the `records`
+    // feature is not enabled, and `(int, double)` is a compile error there.
+    // The CI analyzer caught it; tree-sitter cannot.
+    final hiAt = <int>[];
+    final hiPx = <double>[];
+    final loAt = <int>[];
+    final loPx = <double>[];
     for (var i = k; i < n - k; i++) {
       var isHi = true, isLo = true;
       for (var j = i - k; j <= i + k; j++) {
@@ -3038,19 +3045,25 @@ class Engine {
         if (c[j].high >= c[i].high) isHi = false;
         if (c[j].low <= c[i].low) isLo = false;
       }
-      if (isHi) hi.add((i, c[i].high));
-      if (isLo) lo.add((i, c[i].low));
+      if (isHi) {
+        hiAt.add(i);
+        hiPx.add(c[i].high);
+      }
+      if (isLo) {
+        loAt.add(i);
+        loPx.add(c[i].low);
+      }
     }
     var hiI = 0, loI = 0;
     double? prevHi, prevLo;
     int? lastDir, lastBar;
     for (var i = 0; i < n; i++) {
-      while (hiI < hi.length && hi[hiI].$1 + k <= i) {
-        prevHi = hi[hiI].$2;
+      while (hiI < hiAt.length && hiAt[hiI] + k <= i) {
+        prevHi = hiPx[hiI];
         hiI++;
       }
-      while (loI < lo.length && lo[loI].$1 + k <= i) {
-        prevLo = lo[loI].$2;
+      while (loI < loAt.length && loAt[loI] + k <= i) {
+        prevLo = loPx[loI];
         loI++;
       }
       if (prevHi != null && c[i].close > prevHi) {
