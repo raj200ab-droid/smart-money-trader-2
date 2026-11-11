@@ -1852,3 +1852,20 @@ non-tradeable, or (b) test a chase entry as a *separate* rule set with its own
 measurement, never as a relaxation of this one.
 
 ### §34 · Shipped
+
+| | |
+|---|---|
+| commit | `f67df63` (tag `v18.5.0`) |
+| CI | `42990230649` — green, 0 analyzer errors |
+| release | `42990605382` |
+| asset | `smart-money-trader-v18.5-3M-quiet-list-says-why-18.5.0-30.apk`, 21 010 228 B |
+| QR | `/home/user/v18.5-apk-qr.png` |
+
+**Branch-pointer incident (second time).** The working copy was still sitting on
+`9112397`, a stale `main` from before this branch existed (the same commit that
+had been the base of the v18.3 push failure). The v18.5 commit landed on top of
+it, which would have replaced the branch tip with a tree missing v18.4 entirely.
+Caught by the push rejection, repaired with `git reset --hard fde9c19` and
+re-applying only the five changed files. Worth repeating: **after any push
+rejection, check `git merge-base --is-ancestor` before cherry-picking** -- here
+the local HEAD and origin were not related in the direction assumed.
