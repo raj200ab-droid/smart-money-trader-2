@@ -406,7 +406,7 @@ class TradeSignal {
     required this.eql,
     required this.watch,
     required this.tier,
-    this.thinVolume,
+    this.thinVolume = false,
     this.bos5 = false,
     this.macdGreen = false,
     this.mode = TradeMode.swing,
