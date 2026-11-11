@@ -1982,3 +1982,28 @@ numbers in this section are from the corrected measurement — the first run of 
 (§35 draft) quoted −3 042R from a rule that did not match the app.
 
 ### Shipped
+
+| | |
+|---|---|
+| commit | `885c05e` (tag `v19.0.0`) |
+| CI | `43080210636` — green, 0 analyzer errors |
+| release | `43080600047` |
+| asset | `smart-money-trader-v19.0-3M-BOS-MACD-only-19.0.0-31.apk`, 21 008 415 B |
+| QR | `/home/user/v19.0-apk-qr.png` |
+| corpus | `/tmp/klines` 156 MB, 12 pairs × Sep–Nov 2026 (wiped between turns) |
+
+**The branch pointer reverted for the third time**, always to `9112397` (a
+`main` from before this branch existed). The v19 work was written on top of it
+and would have replaced the branch tip with a tree missing v18.4 and v18.5. Now
+caught by the push rejection each time, repaired with
+`git stash -u` → `git reset --hard origin/<branch>` → copy back the touched
+files. The reliable pre-commit check is one line:
+
+    git merge-base --is-ancestor HEAD origin/<branch> && echo ok
+
+If that fails, do not commit — fix the base first. `git log --oneline -3` alone
+will not show it, because the stale base has a plausible-looking history.
+
+**Records syntax.** `(int, double)` cost a CI run: this project targets a
+language version without the `records` feature. tree-sitter parses it happily;
+`flutter analyze` does not. Parallel lists were the fix.
