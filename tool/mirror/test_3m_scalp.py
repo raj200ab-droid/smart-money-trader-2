@@ -43,74 +43,66 @@ def main():
     src = open(DART).read()
 
     # ---------------------------------------------------------------- 1. the rule
-    print('1. the v19 rule is: 3M only, fresh BOS, MACD green')
+    print('1. the 3M mode is a SCANNER: 5-candle BOS + MACD green, no plan')
     for pat, val, label in [
-        (r"const int bos3mMaxAgo\s*=\s*([0-9]+);", 3, 'BOS freshness window'),
-        (r"const double kScalp3mRR\s*=\s*([0-9.]+);", 3.0, 'R:R'),
+        (r"const int bos5mLookback\s*=\s*([0-9]+);", 5, 'BOS window (candles)'),
         (r"const double kScalp3mMaxPrice\s*=\s*([0-9.]+);", 2.0,
-         'price ceiling'),
-        (r"const double kCostPct\s*=\s*([0-9.]+);", 0.25, 'cost'),
+         'price filter'),
+        (r"const double kCostPct\s*=\s*([0-9.]+);", 0.25, 'cost (context only)'),
     ]:
         m = re.search(pat, src)
-        check(f'{label} = {val}', m is not None and abs(float(m.group(1)) - val) < 1e-9,
+        check(f'{label} = {val}',
+              m is not None and abs(float(m.group(1)) - val) < 1e-9,
               m.group(1) if m else 'not found')
-    check('scalp3mRR still parses for the mirror',
-          re.search(r"static const double scalp3mRR\s*=\s*([0-9.]+);", src)
-          is not None)
 
-    # The two conditions, and nothing else, in Engine.scalp3m.
     i = src.find('static TradeSignal? scalp3m(')
     j = src.find('static int? bosOn(', i)
     body = src[i:j]
-    check('the rule asks for a BOS', 'bosOn(c3, lookback: bos3mMaxAgo)' in body)
-    check('the rule asks for MACD green', 'line > sig && hist >= prevHist' in body)
-    # The deleted rule set must be gone from the decision, not merely unused.
-    for gone, why in [
-        ('e9n > e21n', 'EMA stack'),
-        ('rn >= 30 && rn <= 55', 'RSI band'),
-        ('bar.close > bar.open', 'candle turn'),
-        ('atrPct < scalp3mGate', 'ATR gate'),
-        ('stop5Buy', '5-bar stop'),
-    ]:
+    check('the scanner asks for a BOS', 'bosOn(c3, lookback: bos5mLookback)' in body)
+    check('the scanner asks for MACD green', 'line > sig && hist >= prevHist' in body)
+    check('the price filter is applied', 'px > kScalp3mMaxPrice' in body)
+
+    # --- no trade plan anywhere in this mode. This is the user's explicit
+    # "ami kono doroner entry or exit plan chai nh, risk ratio eyo chai nh".
+    check('no stop is produced', 'a14 * 3' not in body and 'a14 * 1.5' not in body)
+    check('no target is produced', 'kScalp3mRR' not in body)
+    check('sl is not a price', 'sl: 0,' in body)
+    check('tp is not a price', 'tp: 0,' in body)
+    check('the card prints no R:R for 3M',
+          'RR 1:' in src and
+          "'RR 1:${signal.rr.toStringAsFixed(2)}'," in src and
+          'if (signal.mode == TradeMode.scalp3m)' in src)
+    check('the details sheet shows facts, not a plan',
+          "'Match'" in src and "'BOS ($bos5mLookback candles)'" in src)
+    # The old rule set must not linger.
+    for gone, why in [('e9n > e21n', 'EMA stack'), ('rn >= 30 && rn <= 55', 'RSI band'),
+                      ('bar.close > bar.open', 'candle turn'),
+                      ('atrPct < scalp3mGate', 'ATR gate'), ('stop5Buy', '5-bar stop')]:
         check(f'old rule gone: {why}', gone not in body)
-    # ONE series: no other timeframe may be read inside the rule.
-    check('nothing but the 3M series is read',
-          'c4' not in body and 'c15' not in body)
-    check('the card labels say 3M, not a stack',
-          "tf4h: '3M'" in body)
 
-    # The measurement that justifies shipping it as a known-negative rule.
-    check('the measured loss is recorded in the code',
-          '-2 751R' in src or '-2751' in src)
-    check('the shipped exit is the one that was measured',
-          'a14 * 3' in body and 'kScalp3mRR' in body)
-    check('the code says the rule loses money',
-          'loses money' in body or 'loses money' in src)
+    # --- the two sections
+    check('a coin with both facts is TOP', "tier: both ? 'TOP' : 'BOTTOM'" in body)
+    check('both facts are carried on the signal', 'bos5: bosOk' in body
+          and 'macdGreen: green' in body)
+    check('the sort puts 2-of-2 above 1-of-2',
+          '(a.bos5 ? 1 : 0) + (a.macdGreen ? 1 : 0)' in src)
+    check('inside a section, movement wins',
+          'b.chop.compareTo(a.chop)' in src)
+    check('one timeframe only', 'c4' not in body and 'c15' not in body)
 
-    # ---------------------------------------------------------------- 2. gate works
-    print('2. the BOS window and MACD filter behave')
     months = F.month_list('2026-09', '2026-11')
     have_data = os.path.isdir(F.CACHE) and any(
         f.endswith('.csv') for f in os.listdir(F.CACHE))
     if not have_data:
-        # CI has no kline cache (200+ MB of CSV is not source code). Say so
-        # instead of silently passing: a skipped check is not a passed check.
-        print(f'  SKIP  no kline cache at {F.CACHE} -- run '
-              f'tool/mirror/fetch_real_1m.py first')
-        print('  PASS  wiring checks continue below')
-        sections = src
-        check('scalp3m is a TradeMode', 'scalp3m;' in sections)
-        check('scan calls Engine.scalp3m', 'Engine.scalp3m(' in src and 'w15,' in src)
-        # The copy checks below read source only, so a missing kline cache must
-        # not skip them -- that is exactly how a false sentence survived to the
-        # device for a release.
+        print('  SKIP  no kline cache -- source checks above still ran')
         _copy_checks(src)
         print()
         if fails:
             print(f'{len(fails)} FAILED: {fails}')
             return 1
-        print('3M scalp wiring PASS (data checks skipped)')
+        print('scanner wiring PASS (data checks skipped)')
         return 0
+
     # Real-series checks against the SHIPPED rule, mirrored here so the app
     # and the backtest can never drift apart: a BOS needs a pivot, a pivot
     # needs k bars of confirmation, and MACD green is line>signal with a
@@ -145,34 +137,21 @@ def main():
                   0 < greens < len(hist) * 0.6,
                   f'{greens}/{len(hist)} = {greens/len(hist):.2f}')
 
-    # The rule's arithmetic, checked on the same real bars: with a 3xATR stop
-    # the fee is small; with a 1.5xATR stop it is ~0.5R. This is WHY the
-    # measured loss exists, so it is asserted rather than described.
-    if c:
-        # A fixed R band here would be a fake assertion: the majors in this
-        # archive run 0.12-0.22%/bar median, so a 3xATR stop is often only
-        # 0.35-0.7% and the fee is 0.35-0.7R. That is a FACT about the rule,
-        # not a bug -- it is part of why the rule loses. What must hold is:
-        # a wider stop always costs less fee, and the 3xATR stop is the only
-        # multiple that gets the fee under 0.75R on the median pair.
-        vals = []
-        for i in range(200, len(c), 37):
-            a = MB.atr_wilder(c[i - 120:i + 1])
-            if a > 0:
-                vals.append(a / c[i]['close'] * 100)
-        vals.sort()
-        med = vals[len(vals) // 2] if vals else 0.0
-        fee = {}
-        for mult in (1.5, 3.0):
-            stop_pct = med * mult
-            fee[mult] = 0.25 / stop_pct if stop_pct else 99
-        check('a wider stop costs less fee',
-              fee[3.0] < fee[1.5], f'1.5x {fee[1.5]:.2f}R vs 3x {fee[3.0]:.2f}R')
-        check('the 3xATR stop halves the fee of the 1.5x stop',
-              abs(fee[1.5] / fee[3.0] - 2.0) < 0.01,
-              f'{fee[1.5]:.2f} vs {fee[3.0]:.2f}')
-        check('median pair fee is stated, not assumed',
-              0 < fee[3.0] < 99, f'median ATR {med:.3f}%/bar -> {fee[3.0]:.2f}R')
+    # The user's two facts, checked on real bars: a 5-candle BOS must be
+    # present on a minority of bars (it is a filter, not a default), and the
+    # 2-of-2 bucket must be smaller than 1-of-2 -- otherwise "top" and
+    # "bottom" would be the same list.
+    import measure_scanner5 as SC
+    b5 = SC.buckets(c) or []
+    both = sum(1 for (_i, b, g, _a) in b5 if b and g)
+    one = sum(1 for (_i, b, g, _a) in b5 if b != g)
+    check('2-of-2 is a minority of bars', 0 < both < len(b5),
+          f'{both}/{len(b5)}')
+    check('1-of-2 is more common than 2-of-2', one > both,
+          f'one {one} vs both {both}')
+    # the price filter is a filter: a coin over $2 must be refused outright
+    check('an over-$2 coin is refused before scoring',
+          'px > kScalp3mMaxPrice' in body and "no('price')" in body)
 
     # ---------------------------------------------------------------- 4. wiring
     print('4. wiring in main.dart')
@@ -194,7 +173,7 @@ def main():
     print('5. the empty screen explains itself correctly')
     check('scalp3m reports the refusing stage',
           'void Function(String stage)? onRefuse' in src)
-    for stage in ('bos', 'macd', 'stop', 'data'):
+    for stage in ('price', 'none', 'data'):
         check(f'refusal stage \'{stage}\' exists', f"no('{stage}')" in src)
     check('the scalp branch counts each refusal',
           'onRefuse: (stage) {' in src and '_scalp3mWhy[stage] =' in src)
@@ -247,7 +226,7 @@ def _copy_checks(main_src):
     j = main_src.find('String _scalp3mWhyMessage(', i)
     words = main_src[i:j] if i != -1 and j > i else ''
     check('the word function exists', bool(words))
-    for st in ['bos', 'macd', 'stop', 'data']:
+    for st in ['price', 'none', 'data']:
         check(f'stage {st} has words in the row list', f"case '{st}':" in words)
 if __name__ == '__main__':
     sys.exit(main())

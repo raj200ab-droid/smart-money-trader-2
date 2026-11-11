@@ -2013,3 +2013,83 @@ plausible-looking history.
 **Records syntax.** `(int, double)` cost a CI run: this project targets a
 language version without the `records` feature. tree-sitter parses it happily;
 `flutter analyze` does not. Parallel lists were the fix.
+
+---
+
+## §36 · v19.1.0 — the 3M mode becomes a scanner (2026-11-11)
+
+**Third revision of the same mode, in the user's words:**
+
+> "ei mode a just 3 minutes timeframe a analyse korba j 5 candle er modhe a bos
+> hoyse a ki nh r macd a green ace a ki nh. Jodi 2 tai mil takhe a tahole top a
+> asbe oii coin gula r jodi just 1 ta match kore a tahole a niche a asbe coin
+> gula. Besi up-down kore a sei coin gula opur er dikh a takhbe. Just 2 dollars
+> er nice a j coin gula ace a sei gula filter korba. R kono kisu add korba nh,
+> ami kono doroner entry or exit plan chai nh. Risk ratio eyo chai nh."
+
+| v19.0 (yesterday) | v19.1 (this) |
+|---|---|
+| a trade setup | **a scanner** |
+| entry, 3xATR stop, 3R target | **none of it** |
+| BOS within 3 bars | BOS within **5 candles** |
+| both / nothing | **2 of 2 -> TOP**, **1 of 2 -> BOTTOM** |
+| over-$2 sunk to the bottom | over-$2 **filtered out** |
+| fee in R on the card | **no R, no fee, no plan** |
+
+### What was removed, and why it took a test to keep it removed
+
+Entry, stop, target, R:R, the fee line, the confidence percentage, the BUY/SELL
+word on the card, and the `RR 1:x` row in the details sheet. `test_3m_scalp.py`
+now asserts the *absence* of each: `sl: 0`, `tp: 0`, no `kScalp3mRR` in the
+decision, no `a14 * 3`, and the details sheet branching to a facts panel instead
+of a plan. Without those assertions "we removed the plan" is a comment that
+survives until the next edit.
+
+**Why `sl`/`tp` are 0 and not the price:** a number there would be an invented
+plan, and zero is the only value that cannot be mistaken for one. The card shows
+`2.34%/bar` and `2 of 2` where the percentage and `RR 1:x` used to be.
+
+### The measurement (391 680 real 3M bars, 12 pairs, Sep–Nov 2026)
+
+**How the scan splits** (each bar is one observation):
+
+| bucket | bars | share |
+|---|---|---|
+| 2 of 2 (BOS + MACD) | 48 111 | 12.3% |
+| 1 of 2 (BOS only) | 113 353 | 29.0% |
+| 1 of 2 (MACD only) | 54 397 | 13.9% |
+| 0 of 2 | 174 367 | 44.7% |
+
+So the sections are not decorative: **the top is a fifth of the signal bars.**
+
+**How big the top is per scan** — ~15 coins per 120-coin scan, i.e. **roughly 49
+on a 400-coin scan**, maximum 75; **8% of scans have an empty top.**
+
+**What each bucket does next** (10 bars / 30 min, no exit invented):
+
+| bucket | avg forward return | touched +1 ATR before -1 ATR |
+|---|---|---|
+| 2 of 2 | −0.008% | 48.6% |
+| 1 of 2 (BOS) | +0.010% | 50.7% |
+| 1 of 2 (MACD) | −0.000% | 48.7% |
+| 0 of 2 | +0.001% | 50.1% |
+
+**The 2-of-2 bucket is 48.6% — slightly WORSE than a coin flip (50%).** That is
+the honest answer to "does both-matching predict direction on 3M": it does not.
+It is a *scanner* — it tells you which coins are moving and which two conditions
+are aligned right now — and the app must not imply more than that. This is why
+the card carries no side, no target and no R:R: there is nothing measured to
+justify one.
+
+The first version of the section-3 measurement was wrong and said the top was
+always empty: it counted per symbol instead of per timestamp, so the maximum was
+1 by construction. A measurement that cannot produce a non-trivial answer should
+be suspected before it is quoted.
+
+### Parity
+
+`test_3m_parity.py` re-derives the scanner from `lib/main.dart` and now compares
+**match counts** instead of trade prices: 32 445 bars, 10 299 signal bars, 0
+mismatches. The count rose from 2 993 because "1 of 2 only" is a signal now.
+
+### Shipped

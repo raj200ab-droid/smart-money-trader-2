@@ -30,11 +30,12 @@ sys.path.insert(0, os.path.dirname(__file__))
 import fetch_real_1m as F
 import measure_bos_macd as MB
 
-MAX_AGO = 3       # bos3mMaxAgo
-RR = 3.0          # kScalp3mRR
-STOP_MULT = 3.0   # Engine.scalp3m uses 3x ATR
+MAX_AGO = 5       # bos5mLookback
+RR = 3.0          # unused by the scanner: kept so the file still documents
+STOP_MULT = 3.0   # the v19.0 exit that was removed on 2026-11-11
 MIN_STOP = 0.35
 COST = 0.25
+MAX_PRICE = 2.0   # kScalp3mMaxPrice
 
 
 def dart_bos_on(c, lookback=MAX_AGO, k=2):
@@ -105,41 +106,26 @@ def dart_macd_green(closes):
 
 
 def dart_scalp3m(c):
-    """Literal transcription of Engine.scalp3m's decision."""
+    """Literal transcription of Engine.scalp3m AFTER the 2026-11-11 change.
+
+    It returns a MATCH COUNT (0, 1 or 2) rather than a trade, because the mode
+    no longer produces trades. Comparing match counts is what proves the app and
+    the measurement are looking at the same two facts.
+    """
     if len(c) < 60:
         return None
     px = c[-1]['close']
     if px <= 0:
         return None
-    # The window must be long enough that a break visible inside it is the SAME
-    # break the full series reports. 150 bars was not: a pivot whose break
-    # happened just inside the window could be missed when the pre-window bars
-    # (which would have consumed that level) were dropped, so Dart reported a
-    # fresh BOS where the full series had a 5-bar-old one. Longer windows are
-    # the only correct fix -- the O(n^2) cost is avoided by sampling bars in
-    # main(), not by truncating the history the rule is allowed to see.
-    bos = dart_bos_on(c[-400:])
-    if bos is None:
+    if px > MAX_PRICE:                     # user's price filter
         return None
-    # MACD needs a real warm-up: EMA is an infinite impulse response, so a
-    # truncated window gives a DIFFERENT value, not an approximate one. 80 bars
-    # starved it and produced 950 false mismatches; 500 is far past where the
-    # seeds stop mattering (checked: dart and mirror agree to 1e-6 there).
+    bos = dart_bos_on(c[-400:])            # 5-candle window
     green = dart_macd_green([x['close'] for x in c[-500:]])
-    if green is None or not green:
+    if green is None:
         return None
-    a14 = MB.atr_wilder(c[-120:])
-    if a14 <= 0:
-        return None
-    buy = bos > 0
-    risk = a14 * STOP_MULT
-    sl = px - risk if buy else px + risk
-    tp = px + risk * RR if buy else px - risk * RR
-    stop_pct = risk / px * 100
-    if stop_pct < MIN_STOP or stop_pct > 8:
-        return None
-    return {'buy': buy, 'entry': px, 'sl': sl, 'tp': tp,
-            'stop_pct': stop_pct, 'fee': COST / stop_pct}
+    if bos is None and not green:
+        return None                        # 0 of 2: not a signal
+    return {"bos": bos is not None, "macd": bool(green)}
 
 
 def main():
@@ -164,19 +150,13 @@ def main():
 
             # mirror's decision, using its precomputed series
             st = bos[i]
+            b_ok = st is not None and st[1] <= MAX_AGO
+            h = i - pad
+            g_ok = 1 <= h < len(hist) and line[h] > sg[h] and hist[h] >= hist[h - 1]
+            in_price = c[i]['close'] <= MAX_PRICE
             m = None
-            if st is not None and st[1] <= MAX_AGO:
-                h = i - pad
-                if 1 <= h < len(hist) and line[h] > sg[h] and hist[h] >= hist[h - 1]:
-                    a = MB.atr_wilder(c[max(0, i - 100):i + 1])
-                    if a > 0:
-                        # The stop floor is part of the rule. Leaving it out of
-                        # the mirror side made the Dart side look wrong on 8
-                        # bars where the 3xATR stop was under 0.35% -- the app
-                        # was right and this comparison was.
-                        sp = a * STOP_MULT / c[i]['close'] * 100
-                        if MIN_STOP <= sp <= 8:
-                            m = {'buy': st[0] > 0, 'atr': a, 'stop_pct': sp}
+            if in_price and (b_ok or g_ok):
+                m = {"bos": b_ok, "macd": g_ok}
 
             if (d is None) != (m is None):
                 mism += 1
@@ -188,16 +168,10 @@ def main():
             if d is None:
                 continue
             agreed += 1
-            if d['buy'] != m['buy']:
-                mism += 1
-                print(f'  MISMATCH side: {sym} bar {i}')
-                continue
-            # the ATR windows differ (the mirror uses 120 bars for speed), so
-            # compare the DECISION and the fee, not the exact stop
-            if abs(d['fee'] - COST / m['stop_pct']) > 0.02:
+            if d != m:
                 mism += 1
                 if mism <= 5:
-                    print(f'  MISMATCH fee: {sym} bar {i}')
+                    print(f'  MISMATCH facts: {sym} bar {i} dart={d} mirror={m}')
 
     print(f'checked {checked} bars across {len(syms)} pairs; '
           f'{agreed} both-signal bars')

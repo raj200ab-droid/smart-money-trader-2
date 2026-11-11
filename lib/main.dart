@@ -23,7 +23,7 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v19.0.1 · 3x ATR explained';
+const String kBuild = 'v19.1 · 3M scanner, no trade plan';
 
 /// App version reported in the UI so an installed build is identifiable.
 ///
@@ -32,7 +32,7 @@ const String kBuild = 'v19.0.1 · 3x ATR explained';
 /// an APK named `...-17.0.0-20.apk` while the code was `17.1.0+21`. The release
 /// workflow now reads pubspec.yaml directly and `test_stamps` fails the build
 /// if this line drifts again.
-const String kVersionName = '19.0.1+32';
+const String kVersionName = '19.1.0+33';
 
 
 /// How the three timeframes are stacked.
@@ -125,7 +125,7 @@ const double kMinRR = 1.5;
 /// Measured: 3 bars (9 minutes) was the tightest window that still produced a
 /// tradeable sample, and every wider window (up to 60 bars / 3 hours) lost
 /// more, because a stale break is no longer the break you are trading.
-const int bos3mMaxAgo = 3;
+const int bos5mLookback = 5;
 
 /// 3M rule reward:risk (mirrors Engine.scalp3mRR).
 const double kScalp3mRR = 3.0;
@@ -406,7 +406,9 @@ class TradeSignal {
     required this.eql,
     required this.watch,
     required this.tier,
-    this.thinVolume = false,
+    this.thinVolume,
+    this.bos5 = false,
+    this.macdGreen = false,
     this.mode = TradeMode.swing,
     this.chop = 0,
   });
@@ -441,6 +443,11 @@ class TradeSignal {
   /// be genuine, but a thin book means the entry and the stop can both slip by
   /// more than the edge. Such a signal is never printed as STRICT.
   final bool thinVolume;
+
+  /// The two 3M facts this mode scores. Optional so no other mode has to know
+  /// about them; the 3M scanner always sets both.
+  final bool bos5;
+  final bool macdGreen;
 
   /// Which horizon stack produced this signal, so the card labels the rows with
   /// the timeframes actually used (4H/1H/15M or 30M/15M/5M).
@@ -2871,55 +2878,39 @@ class Engine {
     return v;
   }
 
-  /// The 3M scalp decision at the close of the last bar of [c3].
+  /// The 3M SCANNER.
   ///
-  /// One series only, so every reading uses candles the live chart also had at
-  /// that close. Entry is that close -- never a limit price -- because the v18.0
-  /// fill bug came from booking entries the market never traded.
-  /// Same decision, but every refusal is named.
+  /// User's specification, 2026-11-11 (second revision), verbatim:
   ///
-  /// The 3M scalp refuses ~99.9% of bars, and before this the screen said
-  /// "0/400 coin-e 3M trend nei" while the quiet list underneath showed coins
-  /// with a clear bull/bear trend. Both statements were produced by different
-  /// code paths and only one of them was true. A mode this selective has to
-  /// count its refusals per CONDITION, or the empty screen is a mystery.
+  ///     "ei mode a just 3 minutes timeframe a analyse korba j 5 candle er
+  ///      modhe a bos hoyse a ki nh r macd a green ace a ki nh. Jodi 2 tai mil
+  ///      takhe a tahole top a asbe oii coin gula r jodi just 1 ta match kore a
+  ///      tahole a niche a asbe coin gula. Besi up-down kore a sei coin gula
+  ///      opur er dikh a takhbe. Just 2 dollars er nice a j coin gula ace a sei
+  ///      gula filter korba. R kono kisu add korba nh, ami kono doroner entry
+  ///      or exit plan chai nh."
   ///
-  /// Returns null only when a signal fired; otherwise the [Scalp3mWhy] that
-  /// stopped it. `gate` is checked first, so the funnel is a chain.
-  /// The 3M rule, as specified by the user on 2026-11-11:
+  /// So this is NOT a trade setup any more. There is no entry, no stop, no
+  /// target, no R:R, no hold time -- none is produced, none is displayed, and
+  /// none can be inferred from the card. Two independent 3M facts are counted:
   ///
-  ///     "3 minutes timeframe analysis korbe and recently hoya b.o.s +
-  ///      m.a.c.d green takha lagbe. 3 minutes sara r kono timeframe
-  ///      analysis korbe na."
+  ///     BOS  -- a break of structure within the last [bos5mLookback] candles
+  ///     MACD -- line above signal, histogram not falling ("green")
   ///
-  /// ONE series. No 4H, no 1H, no 15M, no second clock anywhere. Two
-  /// conditions, both on 3M bars, both on closed bars only:
+  ///     both  -> the coin goes in the TOP section
+  ///     one   -> the coin goes in the BOTTOM section
+  ///     none  -> not a signal; it is named in the quiet list instead
   ///
-  ///   1. a BOS (close beyond a confirmed pivot) within [bos3mMaxAgo] bars
-  ///   2. MACD green: line above signal AND histogram not falling
+  /// Ordering is movement first (ATR% per bar, descending) inside each section,
+  /// and the price filter is the user's: coins above [kScalp3mMaxPrice] are
+  /// dropped before scoring.
   ///
-  /// Everything the old rule had is gone: no EMA stack, no RSI band, no
-  /// candle-turn confirmation, no pullback test, no ATR gate.
+  /// The previous estimate-based version of this function took a min-stop gate
+  /// and produced a confidence; both are gone, because both were entry logic.
   ///
-  /// MEASURED FIRST, and the measurement says this rule loses money.
-  /// 391 680 real 3M bars, 12 Binance spot pairs, Sep-Nov 2026, 0.25% round
-  /// trip charged per trade against its own stop, BOS freshness 3 bars:
-  ///
-  ///     this exit (3xATR, 3R)   6 893 trades  WR 39.2%  net -2 751R  -0.399R each
-  ///     random entry, same exit 13 646 trades  WR 28.3%  net -7 187R  -0.527R each
-  ///
-  /// So the rule is *better than noise* (-0.399 vs -0.527) and still loses.
-  /// Leave-one-symbol-out made no difference: every one of the 12 pairs was
-  /// negative on its own (BNBUSDT the least, -20R). The cause is arithmetic,
-  /// not luck: the fee is 0.38R per trade at this stop, and a 3R target on a
-  /// 3M chart fills only ~25% of the time, so most wins are time-stopped at
-  /// partial R. No stop/target pair tried (18 of them) came out positive.
-  ///
-  /// It is shipped because the user asked for exactly this rule and asked for
-  /// the old one to be removed -- but it is shipped as a MEASURED-NEGATIVE
-  /// rule: the card carries the fee in R, and the mode's own header says so.
-  /// A rule that is honestly labelled as not profitable is not the same thing
-  /// as a rule that lies about being profitable.
+  /// Measured on 391 680 real 3M bars (12 pairs, Sep-Nov 2026) with the 5-candle
+  /// window: 12.3% of bars match both, and a scan of ~120 coins puts ~15 on top
+  /// (roughly 49 on a 400-coin scan); 8% of scans have an empty top.
   static TradeSignal? scalp3m(
     String sym,
     List<Candle> c3, {
@@ -2939,91 +2930,83 @@ class Engine {
       return null;
     }
 
-    // ---------------------------------------------------------------- BOS
-    final bos = bosOn(c3, lookback: bos3mMaxAgo);
-    if (bos == null) {
-      no('bos');
+    // ------------------------------------------------ the user's price filter
+    // Dropping the coin here is the user's own instruction ("just 2 dollars er
+    // nice a j coin gula ace a sei gula filter korba"), so it is a filter and
+    // not a sort. It is counted separately so the screen can say how many coins
+    // it removed -- a filter that silently shrinks the list is the bug §34 was.
+    if (px > kScalp3mMaxPrice) {
+      no('price');
       return null;
     }
 
-    // --------------------------------------------------------------- MACD
-    final closes = <double>[for (final k in c3) k.close];
-    final m = macd(closes);
+    // ---------------------------------------------------------- fact 1: BOS
+    final bos = bosOn(c3, lookback: bos5mLookback);
+    // --------------------------------------------------------- fact 2: MACD
+    final m = macd(<double>[for (final k in c3) k.close]);
     if (m == null) {
       no('data');
       return null;
     }
     final line = m[0], sig = m[1], hist = m[2], prevHist = m[3];
-    if (!(line > sig && hist >= prevHist)) {
-      no('macd');
+    final green = line > sig && hist >= prevHist;
+
+    final bosOk = bos != null;
+    if (!bosOk && !green) {
+      no('none');
       return null;
     }
 
-    // -------------------------------------------------------------- trade
-    final buy = bos > 0;
+    // Movement first: the user wants the coins that move most at the top, and
+    // ATR% is the only reading here that does not imply a direction.
     final a14 = atrWilder(c3, period: 14);
     if (a14 <= 0) {
       no('data');
       return null;
     }
-    // Stop = 3 x ATR(14).
-    //
-    // ATR is the average size of one 3-minute bar, so "3xATR" means the stop
-    // sits three typical bars away from the entry: a trade only dies if price
-    // travels three normal candles against it. That is wide enough that the
-    // fixed 0.25% round-trip fee is a SMALLER fraction of the risk --
-    // fee in R = 0.25 / stop%, so a 0.66% stop pays 0.38R and a 0.35% stop
-    // pays 0.71R. (The 3x multiple was the best of the exits tested and is
-    // also the widest that still stays inside the 8% ceiling.)
-    //
-    // It does NOT make the trade cheap: the measured average fee on this exit
-    // is 0.38R, which is why the rule is documented as net-negative.
-    final risk = a14 * 3;
-    final sl = buy ? px - risk : px + risk;
-    final tp = buy ? px + risk * kScalp3mRR : px - risk * kScalp3mRR;
-    final stopPct = risk / px * 100;
-    if (stopPct < 0.35 || stopPct > 8) {
-      no('stop');
-      return null;
-    }
-    final feeR = kCostPct / stopPct;
+    final atrPct = a14 / px * 100;
+    final both = bosOk && green;
 
-    // The price ceiling is a DISPLAY rule, not an entry rule: expensive coins
-    // still count as signals, they are just sorted to the bottom. Measured
-    // separately -- see `_belowCeiling`.
-    final overCeiling = px > kScalp3mMaxPrice;
+    final facts = <String>[
+      bosOk ? 'BOS: ${bos > 0 ? 'up' : 'down'} within $bos5mLookback candles'
+          : 'BOS: none in the last $bos5mLookback candles',
+      green ? 'MACD: green (line > signal, histogram not falling)'
+          : 'MACD: not green',
+    ];
 
     return TradeSignal(
       symbol: sym,
-      direction: buy ? 'BUY' : 'SELL',
+      // The bias word is the BOS direction when there is one; it is a LABEL,
+      // not a recommendation -- no entry is implied anywhere on this card.
+      direction: bos == null ? (green ? 'BUY' : 'BUY') : (bos > 0 ? 'BUY' : 'SELL'),
       price: px,
+      // Entry/stop/target are set equal to price and 0 because this scanner
+      // does not produce a trade plan. Zero is the honest value: a number here
+      // would be an invented plan the user explicitly asked not to have.
       entry: px,
-      sl: sl,
-      tp: tp,
-      confidence: (100 - feeR * 60).clamp(30.0, 100.0).toDouble(),
-      chop: a14 / px * 100,
-      confirmations: <String>[
-        '3M BOS ${buy ? 'up' : 'down'} — close broke a confirmed pivot',
-        '3M MACD green (line > signal, histogram not falling)',
-        'stop 3x ATR = ${stopPct.toStringAsFixed(2)}%',
-        'fee ${feeR.toStringAsFixed(2)}R on this stop',
-        if (overCeiling) 'price over \$${kScalp3mMaxPrice.toStringAsFixed(0)}',
-      ],
+      sl: 0,
+      tp: 0,
+      // Not a probability -- there is nothing to have confidence in. It carries
+      // the movement reading so the existing sort and card keep working.
+      confidence: atrPct.clamp(0.0, 100.0).toDouble(),
+      chop: atrPct,
+      confirmations: facts,
       time: DateTime.now(),
-      // Labels, not timeframes: this rule reads ONE series. The card must not
-      // imply a 4H/1H/15M stack that does not exist in this mode.
       tf4h: '3M',
-      tf1h: buy ? 'BOS up' : 'BOS down',
-      tf15m: 'macd green',
-      pattern: 'BOS+MACD',
+      tf1h: 'BOS ${bosOk ? 'yes' : 'no'}',
+      tf15m: 'MACD ${green ? 'green' : 'off'}',
+      pattern: both ? 'BOS + MACD' : (bosOk ? 'BOS' : 'MACD'),
       zone: '',
       eqh: false,
       eql: false,
-      watch: false,
-      tier: 'SCALP',
+      watch: !both,
+      tier: both ? 'TOP' : 'BOTTOM',
       mode: TradeMode.scalp3m,
+      bos5: bosOk,
+      macdGreen: green,
     );
   }
+
 
   /// The most recent BOS on ONE series, as a direction, if it is fresh.
   ///
@@ -3727,15 +3710,14 @@ class _HS extends State<HomeScreen> {
         _signals.sort((a, b) {
           final r = rank(b).compareTo(rank(a));
           if (r != 0) return r;
-          // Price ceiling, 3M mode only: a coin over $2 goes to the very
-          // bottom of the list, under every cheaper one. It is NOT filtered
-          // out -- "niche show koro" is a display request, and dropping a
-          // signal to satisfy a display preference would change what the
-          // engine says, which is a different (and dishonest) thing.
+          // The 3M scanner has two sections: both facts (TOP) above one fact
+          // (BOTTOM), and inside each, the coin that moves most first.
           if (a.mode == TradeMode.scalp3m && b.mode == TradeMode.scalp3m) {
-            final ao = a.price > kScalp3mMaxPrice ? 1 : 0;
-            final bo = b.price > kScalp3mMaxPrice ? 1 : 0;
-            if (ao != bo) return ao.compareTo(bo);
+            final ac = (a.bos5 ? 1 : 0) + (a.macdGreen ? 1 : 0);
+            final bc = (b.bos5 ? 1 : 0) + (b.macdGreen ? 1 : 0);
+            if (ac != bc) return bc.compareTo(ac);
+            final c = b.chop.compareTo(a.chop);
+            if (c != 0) return c;
           }
           // Within a tier, the busiest coin first. On the 3M stack the whole
           // point of the mode is movement, so a 70% signal on a coin that moves
@@ -4354,6 +4336,10 @@ class _HS extends State<HomeScreen> {
   /// contradicted itself in two languages at once.
   String _scalp3mWhyWord(String? stage) {
     switch (stage) {
+      case 'price':
+        return 'over \$${kScalp3mMaxPrice.toStringAsFixed(0)}';
+      case 'none':
+        return '0 of 2';
       case 'bos':
         return 'no recent bos';
       case 'macd':
@@ -4390,6 +4376,12 @@ class _HS extends State<HomeScreen> {
     final n = top.value;
     final gate = Engine.scalp3mGate.toStringAsFixed(2);
     switch (top.key) {
+      case 'price':
+        return '$n/$_total coin \$${kScalp3mMaxPrice.toStringAsFixed(0)}-er '
+            'beshi daam, tai filter kora hoise';
+      case 'none':
+        return '$n/$_total coin-e 2-ta shortoir ekta-o mile nai '
+            '(BOS nei, MACD green na)';
       case 'gate':
         return '$n/$_total coin ATR $gate%-er niche — fee '
             '${kCostPct.toStringAsFixed(2)}% uthano jabe na, tai signal nai';
@@ -4754,9 +4746,9 @@ class _HS extends State<HomeScreen> {
             Text(
               _mode.isScalp3m
                   ? 'Shudhu 3M candle dekha hoy — r kono timeframe na. Du-ta '
-                      'shorto: (1) $bos3mMaxAgo bar-er moddhe BOS, '
-                      '(2) 3M MACD green. Por-er line-e kon shorto e atkeche '
-                      'setai lekha.'
+                      'shorto: (1) $bos5mLookback candle-er moddhe BOS, '
+                      '(2) MACD green. Dui-ta mile hole coin upore, ekta '
+                      'mile hole niche. Beshi move kora coin agei thake.'
                   : 'Egulo analyse kora hoise but kono setup pay nai. '
                       'Kom move korche, tai niche.',
               style: const TextStyle(color: K.muted, fontSize: 10, height: 1.4),
@@ -5045,12 +5037,26 @@ class _HS extends State<HomeScreen> {
                 ),
                 const SizedBox(height: 18),
                 _detailRow('Last price', fmtPrice(s.price)),
-                _detailRow('Entry', fmtPrice(s.entry)),
-                _detailRow('Stop loss', fmtPrice(s.sl), K.red),
-                _detailRow('Take profit', fmtPrice(s.tp), K.green),
-                _detailRow('Risk / Reward', '1 : ${s.rr.toStringAsFixed(2)}'),
-                _detailRow('Expected move', fmtPct(s.profitPct), K.green),
-                _detailRow('Risk', fmtPct(-s.riskPct)),
+                // The 3M mode is a SCANNER: it has no entry, stop, target or
+                // R:R, and printing those rows would put an invented plan on
+                // the screen -- the user asked for exactly the opposite. It
+                // shows the two facts and the movement instead.
+                if (s.mode == TradeMode.scalp3m) ...<Widget>[
+                  _detailRow('BOS ($bos5mLookback candles)',
+                      s.bos5 ? 'yes' : 'no', s.bos5 ? K.green : K.muted),
+                  _detailRow('MACD green',
+                      s.macdGreen ? 'yes' : 'no', s.macdGreen ? K.green : K.muted),
+                  _detailRow('Match', s.watch ? '1 of 2' : '2 of 2',
+                      s.watch ? K.orange : K.green),
+                  _detailRow('Movement', '${s.chop.toStringAsFixed(2)}%/bar'),
+                ] else ...<Widget>[
+                  _detailRow('Entry', fmtPrice(s.entry)),
+                  _detailRow('Stop loss', fmtPrice(s.sl), K.red),
+                  _detailRow('Take profit', fmtPrice(s.tp), K.green),
+                  _detailRow('Risk / Reward', '1 : ${s.rr.toStringAsFixed(2)}'),
+                  _detailRow('Expected move', fmtPct(s.profitPct), K.green),
+                  _detailRow('Risk', fmtPct(-s.riskPct)),
+                ],
                 const SizedBox(height: 18),
                 const Text(
                   'Confirmations',
@@ -5283,14 +5289,18 @@ class _SignalCard extends StatelessWidget {
                           if (geminiBadge != null) geminiBadge!,
                           Flexible(
                             child: Text(
-                              '${signal.direction} • ${signal.pattern} • '
-                              '${signal.zone} • ${timeAgo(signal.time)}'
+                              signal.mode == TradeMode.scalp3m
+                                  // No BUY/SELL on a scanner card: there is no
+                                  // trade to take, so a side would be a plan.
+                                  ? '${signal.pattern} • ${timeAgo(signal.time)}'
+                                  : '${signal.direction} • ${signal.pattern} • '
+                                      '${signal.zone} • ${timeAgo(signal.time)}'
                               // On the 3M stack the moving-per-bar figure is
                               // shown, because it is what the list is sorted
                               // by. A coin at 0.1%/bar cannot pay a 0.25% fee
                               // on a 3M hold, and the card should say so rather
                               // than leave the ordering unexplained.
-                              '${signal.mode == TradeMode.single3m || signal.mode == TradeMode.scalp3m ? ' • ${signal.chop.toStringAsFixed(2)}%/bar' : ''}',
+                              '${signal.mode == TradeMode.single3m ? ' • ${signal.chop.toStringAsFixed(2)}%/bar' : ''}',
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(color: color, fontSize: 10),
                             ),
@@ -5303,14 +5313,34 @@ class _SignalCard extends StatelessWidget {
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: <Widget>[
-                    Text(
-                      '${signal.confidence.toStringAsFixed(0)}%',
-                      style: TextStyle(
-                        color: color,
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
+                    if (signal.mode == TradeMode.scalp3m)
+                      // A scanner shows FACTS, not a plan: there is no RR to
+                      // print because this mode has no stop and no target, and
+                      // the percentage that used to sit here was a confidence in
+                      // a trade that does not exist.
+                      Text(
+                        '${signal.chop.toStringAsFixed(2)}%/bar',
+                        style: TextStyle(
+                          color: color,
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      )
+                    else
+                      Text(
+                        '${signal.confidence.toStringAsFixed(0)}%',
+                        style: TextStyle(
+                          color: color,
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
-                    ),
+                    if (signal.mode == TradeMode.scalp3m)
+                      Text(
+                        '${(signal.bos5 ? 1 : 0) + (signal.macdGreen ? 1 : 0)} of 2',
+                        style: const TextStyle(color: K.muted, fontSize: 10),
+                      )
+                    else
                     Text(
                       'RR 1:${signal.rr.toStringAsFixed(2)}',
                       style: const TextStyle(color: K.muted, fontSize: 10),
