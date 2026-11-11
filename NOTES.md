@@ -2093,3 +2093,16 @@ be suspected before it is quoted.
 mismatches. The count rose from 2 993 because "1 of 2 only" is a signal now.
 
 ### Shipped
+
+| | |
+|---|---|
+| commit | `c3e317d` (tag `v19.1.0`) |
+| CI | `43087050743` — green, 0 analyzer errors |
+| release | `43088451359` |
+| asset | `smart-money-trader-v19.1-3M-scanner-no-trade-plan-19.1.0-33.apk`, 21 014 268 B |
+| QR | `/home/user/v19.1-apk-qr.png` |
+
+**Analyzer caught two things tree-sitter cannot**: a duplicated `= false` in the
+constructor and a non-nullable parameter (`thinVolume`) that gained neighbours
+with defaults but had none of its own. Both are the kind of edit corruption that
+a text-level parser accepts.
