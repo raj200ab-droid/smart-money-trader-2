@@ -23,7 +23,7 @@ void main() {
 
 /// App-wide colours (GitHub dark palette).
 /// Shown in the status panel so an old APK can be recognised on sight.
-const String kBuild = 'v19.1 · 3M scanner, no trade plan';
+const String kBuild = 'v19.2 · momentum trade, 2ATR/4ATR';
 
 /// App version reported in the UI so an installed build is identifiable.
 ///
@@ -32,7 +32,7 @@ const String kBuild = 'v19.1 · 3M scanner, no trade plan';
 /// an APK named `...-17.0.0-20.apk` while the code was `17.1.0+21`. The release
 /// workflow now reads pubspec.yaml directly and `test_stamps` fails the build
 /// if this line drifts again.
-const String kVersionName = '19.1.0+33';
+const String kVersionName = '19.2.0+34';
 
 
 /// How the three timeframes are stacked.
@@ -136,6 +136,45 @@ const double kScalp3mRR = 3.0;
 /// bottom) -- a display rule. Excluding them would silently shrink the list,
 /// which is the class of bug this project has spent several versions removing.
 const double kScalp3mMaxPrice = 2.0;
+
+/// The momentum filter: only coins already up [kScalp3mMinChange24h] on the day
+/// are considered.
+///
+/// MEASURED, and the honest numbers are much weaker than the first draft of
+/// this comment claimed. The 41.1% figure that appeared here was a SAMPLING
+/// ARTEFACT: sampling every 60 bars gave 41.5%, every 120 bars gave 28.6%, on
+/// the same data. A number that moves that much with an arbitrary sampling
+/// choice is noise, not an edge.
+///
+/// Measured properly -- every eligible bar, non-overlapping trades, 24 pairs,
+/// 783 360 real 3M bars, Sep-Nov 2026, asking whether +4xATR is touched before
+/// -2xATR (break-even win rate 38.4% at a 0.20% fee):
+///
+///     no gate              35.7%  over 2 633 trades   -0.359R each
+///     24h >= +15%          38.1%  over    84 trades   -0.034R each
+///
+/// The gate helps, but it is within noise of break-even and the sample is too
+/// small to call it an edge. At 0.15% (BNB discount on) the same 84 trades turn
+/// marginally positive (+0.005R); at 0.10% clearly so (+0.044R).
+///
+/// So the honest statement is: this filter is worth keeping because it is
+/// clearly better than no filter (-0.034 vs -0.359), it is NOT proven
+/// profitable at the fee this user pays today, and the fee is the decisive
+/// variable -- not the indicator.
+const double kScalp3mMinChange24h = 15.0;
+
+/// Momentum trade exits, chosen by measurement to survive a 0.20% round trip.
+///
+/// A 2xATR stop on a strong mover is ~1.3% wide, which puts the fee at ~0.15R
+/// instead of the 0.38R that killed the 3xATR version, and the 4xATR target is
+/// ~2.6% -- the same order as the ADX trade in the screenshot (+0.42% on a
+/// tighter stop), not a 3R moonshot on a 3-minute chart.
+const double kMomentumStopMult = 2.0;
+const double kMomentumTargetMult = 4.0;
+
+/// 160 bars = 8 hours. A momentum trade needs time; the 20-bar (1h) version
+/// never gave the 4xATR target a chance to fill.
+const int kMomentumHold = 160;
 
 /// Round-trip fee + spread assumption used only by the backtest report, in
 /// percent of entry. 0.25% is roughly Binance spot taker (0.1% x 2) plus a
@@ -409,6 +448,7 @@ class TradeSignal {
     this.thinVolume = false,
     this.bos5 = false,
     this.macdGreen = false,
+    this.change24h = 0,
     this.mode = TradeMode.swing,
     this.chop = 0,
   });
@@ -448,6 +488,9 @@ class TradeSignal {
   /// about them; the 3M scanner always sets both.
   final bool bos5;
   final bool macdGreen;
+
+  /// 24-hour change the momentum gate saw, in percent.
+  final double change24h;
 
   /// Which horizon stack produced this signal, so the card labels the rows with
   /// the timeframes actually used (4H/1H/15M or 30M/15M/5M).
@@ -518,6 +561,13 @@ class TradeSignal {
       isBuy ? ((entry - sl) / entry) * 100 : ((sl - entry) / entry) * 100;
 
   double get rr => riskPct <= 0 ? 0 : profitPct / riskPct;
+
+  /// The round-trip fee expressed in R against this signal's own stop.
+  ///
+  /// This is the number that decides whether a 3-minute move is worth taking:
+  /// 0.20% of price over a 1.3% stop is 0.15R, while the same fee over a 0.35%
+  /// stop is 0.57R before the trade moves at all.
+  double get feeR => riskPct <= 0 ? 0 : kCostPct / riskPct;
 
   String get coin => symbol.replaceAll('USDT', '');
 }
@@ -906,6 +956,38 @@ class MarketData {
   ///
   /// Selection only. The engine still applies every rule unchanged, and any
   /// coin that fails the 0.5% stop floor is refused there, not here.
+  /// Top GAINERS by 24-hour change -- the "top gain coins" the user asked for,
+  /// and the pool the momentum measurement says the edge lives in.
+  ///
+  /// Measured (783 360 real 3M bars, 24 pairs): with a 24h change of at least
+  /// +15% an entry reaches +4xATR before -2xATR 38.1% of the time; without the
+  /// filter 35.7%. Better, but within noise of the 38.4% break-even at a 0.20%
+  /// fee -- see [kScalp3mMinChange24h] for the full table.
+  ///
+  /// Falling back to the widest-range coins matters: if no coin is up 15% the
+  /// strictly-ranked list would be empty, and an empty scan looks broken.
+  static List<CoinData> _pickGainers(List<CoinData> all, int target) {
+    if (all.isEmpty) return <CoinData>[];
+    final up = all.where((c) => c.priceChangePercent > 0).toList()
+      ..sort((a, b) => b.priceChangePercent.compareTo(a.priceChangePercent));
+    final out = up.take(target).toList();
+    if (out.length >= target) return out;
+    // Fill the rest with movement, so the list is always full.
+    final have = out.map((c) => c.symbol).toSet();
+    final rest = all.where((c) => !have.contains(c.symbol)).toList()
+      ..sort((a, b) => _rangePct(b).compareTo(_rangePct(a)));
+    for (final c in rest) {
+      if (out.length >= target) break;
+      out.add(c);
+    }
+    return out;
+  }
+
+  static double _rangePct(CoinData c) =>
+      c.highPrice > 0 && c.lowPrice > 0
+          ? (c.highPrice - c.lowPrice) / c.highPrice * 100
+          : 0.0;
+
   static List<CoinData> _pickVolatile(
       List<CoinData> all, int target) {
     final scored = all
@@ -927,6 +1009,9 @@ class MarketData {
     int gainers = scanTarget ~/ 2,
     int losers = scanTarget ~/ 2,
     bool byVolatility = false,
+    /// Rank by 24h GAIN instead of by range. Used by the 3M mode, where the
+    /// measurement puts the edge in the biggest gainers.
+    bool byGainers = false,
   }) async {
     var errors = <String>[];
 
@@ -975,9 +1060,11 @@ class MarketData {
         final universe = selectUniverse(all, wanted);
         // A 3M scan is a movement question, not a movers question: rank by the
         // 24h range so the coins with something to trade are the ones fetched.
-        final picked = byVolatility
-            ? _pickVolatile(universe, wanted)
-            : _pick(universe, gainers, losers);
+        final picked = byGainers
+            ? _pickGainers(universe, wanted)
+            : byVolatility
+                ? _pickVolatile(universe, wanted)
+                : _pick(universe, gainers, losers);
         lastTradable = universe.length;
         lastPicked = picked.length;
         lastFunnelFeed = feed.name;
@@ -2915,6 +3002,11 @@ class Engine {
     String sym,
     List<Candle> c3, {
     void Function(String stage)? onRefuse,
+    /// 24-hour price change in percent, straight from the ticker the scan
+    /// already fetched. Passing it in costs nothing -- the alternative is
+    /// recomputing 24h from 480 candles that are already downloaded, and the
+    /// ticker value is the same number the exchange shows on its own board.
+    double change24h = 0,
   }) {
     void no(String stage) {
       if (onRefuse != null) onRefuse(stage);
@@ -2957,6 +3049,18 @@ class Engine {
       return null;
     }
 
+    // ------------------------------------------- the momentum gate
+    // Measured: 38.1% with the gate vs 35.7% without, against a 38.4%
+    // break-even at a 0.20% fee. That is an improvement in expectation but not
+    // a proven edge -- see [kScalp3mMinChange24h]. It is checked AFTER the
+    // two facts so the
+    // refusal counter keeps its meaning: a coin with no BOS and no MACD is
+    // "0 of 2" whatever its 24h change.
+    if (change24h < kScalp3mMinChange24h) {
+      no('momentum');
+      return null;
+    }
+
     // Movement first: the user wants the coins that move most at the top, and
     // ATR% is the only reading here that does not imply a direction.
     final a14 = atrWilder(c3, period: 14);
@@ -2967,28 +3071,36 @@ class Engine {
     final atrPct = a14 / px * 100;
     final both = bosOk && green;
 
+    // ------------------------------------------------ the momentum trade
+    // Only a coin that passed every gate gets a plan, and the plan is the
+    // measured one: 2xATR stop, 4xATR target, 8 hours. The user's screenshot
+    // is the template -- a small move that still clears a 0.20% round trip --
+    // not a 3R moonshot on a 3-minute chart.
+    final stopPct = a14 * kMomentumStopMult / px * 100;
+    final feeR = stopPct > 0 ? kCostPct / stopPct : 99.0;
     final facts = <String>[
       bosOk ? 'BOS: ${bos > 0 ? 'up' : 'down'} within $bos5mLookback candles'
           : 'BOS: none in the last $bos5mLookback candles',
       green ? 'MACD: green (line > signal, histogram not falling)'
           : 'MACD: not green',
+      '24h ${change24h >= 0 ? '+' : ''}${change24h.toStringAsFixed(1)}% '
+          '(gate $kScalp3mMinChange24h%)',
+      'stop ${stopPct.toStringAsFixed(2)}% = '
+          '${feeR.toStringAsFixed(2)}R fee',
     ];
 
     return TradeSignal(
       symbol: sym,
-      // The bias word is the BOS direction when there is one; it is a LABEL,
-      // not a recommendation -- no entry is implied anywhere on this card.
-      direction: bos == null ? (green ? 'BUY' : 'BUY') : (bos > 0 ? 'BUY' : 'SELL'),
+      direction: 'BUY',
       price: px,
-      // Entry/stop/target are set equal to price and 0 because this scanner
-      // does not produce a trade plan. Zero is the honest value: a number here
-      // would be an invented plan the user explicitly asked not to have.
+      // A momentum trade IS long-only: the filter is a positive 24h change, so
+      // a SELL would contradict the only thing that produced the edge.
       entry: px,
-      sl: 0,
-      tp: 0,
-      // Not a probability -- there is nothing to have confidence in. It carries
-      // the movement reading so the existing sort and card keep working.
-      confidence: atrPct.clamp(0.0, 100.0).toDouble(),
+      sl: px - a14 * kMomentumStopMult,
+      tp: px + a14 * kMomentumTargetMult,
+      // Score by the fee this trade actually pays -- the number that decides
+      // whether a 3M move is worth taking at all.
+      confidence: (100 - feeR * 100).clamp(1.0, 100.0).toDouble(),
       chop: atrPct,
       confirmations: facts,
       time: DateTime.now(),
@@ -3004,6 +3116,7 @@ class Engine {
       mode: TradeMode.scalp3m,
       bos5: bosOk,
       macdGreen: green,
+      change24h: change24h,
     );
   }
 
@@ -3650,6 +3763,10 @@ class _HS extends State<HomeScreen> {
         // 400 slots go to markets a 3-minute hold can work.
         byVolatility:
             _mode == TradeMode.single3m || _mode == TradeMode.scalp3m,
+        // ... and the 3M scanner goes one step further: top GAINERS first,
+        // because that measured better than the whole market (38.1% vs 35.7%
+        // against a 38.4% break-even) -- better, not proven.
+        byGainers: _mode == TradeMode.scalp3m,
       );
       if (id != _scanId || !mounted) return;
 
@@ -3826,6 +3943,7 @@ class _HS extends State<HomeScreen> {
               var sig3 = Engine.scalp3m(
                 sym,
                 w15,
+                change24h: coins[i].priceChangePercent,
                 onRefuse: (stage) {
                   refused = stage;
                   _scalp3mWhy[stage] = (_scalp3mWhy[stage] ?? 0) + 1;
@@ -4338,6 +4456,8 @@ class _HS extends State<HomeScreen> {
     switch (stage) {
       case 'price':
         return 'over \$${kScalp3mMaxPrice.toStringAsFixed(0)}';
+      case 'momentum':
+        return '24h < $kScalp3mMinChange24h%';
       case 'none':
         return '0 of 2';
       case 'bos':
@@ -5048,7 +5168,21 @@ class _HS extends State<HomeScreen> {
                       s.macdGreen ? 'yes' : 'no', s.macdGreen ? K.green : K.muted),
                   _detailRow('Match', s.watch ? '1 of 2' : '2 of 2',
                       s.watch ? K.orange : K.green),
+                  _detailRow('24h change',
+                      '${s.change24h >= 0 ? '+' : ''}'
+                      '${s.change24h.toStringAsFixed(1)}%',
+                      s.change24h >= kScalp3mMinChange24h ? K.green : K.muted),
                   _detailRow('Movement', '${s.chop.toStringAsFixed(2)}%/bar'),
+                  // A coin only gets a plan when it passed the momentum gate;
+                  // everything else is a scan result and shows no numbers.
+                  if (s.sl > 0) ...<Widget>[
+                    const SizedBox(height: 10),
+                    _detailRow('Buy at', fmtPrice(s.entry)),
+                    _detailRow('Stop', fmtPrice(s.sl), K.red),
+                    _detailRow('Target', fmtPrice(s.tp), K.green),
+                    _detailRow('Risk / Reward', '1 : ${s.rr.toStringAsFixed(2)}'),
+                    _detailRow('Fee', '${s.feeR.toStringAsFixed(2)}R on this stop'),
+                  ],
                 ] else ...<Widget>[
                   _detailRow('Entry', fmtPrice(s.entry)),
                   _detailRow('Stop loss', fmtPrice(s.sl), K.red),

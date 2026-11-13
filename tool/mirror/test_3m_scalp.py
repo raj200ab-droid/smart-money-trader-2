@@ -48,6 +48,9 @@ def main():
         (r"const int bos5mLookback\s*=\s*([0-9]+);", 5, 'BOS window (candles)'),
         (r"const double kScalp3mMaxPrice\s*=\s*([0-9.]+);", 2.0,
          'price filter'),
+        (r"const double kScalp3mMinChange24h\s*=\s*([0-9.]+);", 15.0,
+         'momentum gate'),
+        (r"const int kMomentumHold\s*=\s*([0-9]+);", 160, 'hold (bars)'),
         (r"const double kCostPct\s*=\s*([0-9.]+);", 0.25, 'cost (context only)'),
     ]:
         m = re.search(pat, src)
@@ -64,16 +67,29 @@ def main():
 
     # --- no trade plan anywhere in this mode. This is the user's explicit
     # "ami kono doroner entry or exit plan chai nh, risk ratio eyo chai nh".
-    check('no stop is produced', 'a14 * 3' not in body and 'a14 * 1.5' not in body)
-    check('no target is produced', 'kScalp3mRR' not in body)
-    check('sl is not a price', 'sl: 0,' in body)
-    check('tp is not a price', 'tp: 0,' in body)
-    check('the card prints no R:R for 3M',
-          'RR 1:' in src and
-          "'RR 1:${signal.rr.toStringAsFixed(2)}'," in src and
-          'if (signal.mode == TradeMode.scalp3m)' in src)
-    check('the details sheet shows facts, not a plan',
+    # v19.2 (2026-11-14): the user asked for the ADX-style trade to be added to
+    # this mode, so a plan EXISTS again -- but only for a coin that passed the
+    # momentum gate, and it is the measured 2xATR / 4xATR / 8h one, not a
+    # 3R moonshot. Both facts must be pinned, or the next edit can silently
+    # put a plan back on coins that never earned one.
+    check('the stop is 2xATR', 'a14 * kMomentumStopMult' in body)
+    check('the target is 4xATR', 'a14 * kMomentumTargetMult' in body)
+    check('stop/target come from the constants',
+          'kMomentumStopMult' in src and 'kMomentumTargetMult' in src
+          and re.search(r'const double kMomentumStopMult\s*=\s*([0-9.]+);', src)
+          and abs(float(re.search(r'const double kMomentumStopMult\s*=\s*([0-9.]+);',
+                                  src).group(1)) - 2.0) < 1e-9)
+    check('the mode is long-only (the filter is a positive 24h change)',
+          "direction: 'BUY'," in body)
+    check('the momentum gate is before the signal',
+          body.find("no('momentum')") < body.find('return TradeSignal('))
+    check('the 24h change is on the card', 'change24h: change24h' in body)
+    check('the details sheet shows the facts',
           "'Match'" in src and "'BOS ($bos5mLookback candles)'" in src)
+    # ... and shows a plan ONLY when one was earned (sl > 0).
+    check('the plan rows are behind sl > 0', 'if (s.sl > 0)' in src)
+    check('the momentum universe ranking exists',
+          '_pickGainers' in src and 'byGainers: _mode == TradeMode.scalp3m' in src)
     # The old rule set must not linger.
     for gone, why in [('e9n > e21n', 'EMA stack'), ('rn >= 30 && rn <= 55', 'RSI band'),
                       ('bar.close > bar.open', 'candle turn'),
@@ -149,6 +165,53 @@ def main():
           f'{both}/{len(b5)}')
     check('1-of-2 is more common than 2-of-2', one > both,
           f'one {one} vs both {both}')
+    # The momentum gate: assert on real bars, at EVERY eligible bar with
+    # non-overlapping trades. The first version of this check sampled every
+    # 240 bars and produced 33 trades, which is not a test -- and sampling
+    # every 60 vs 120 bars flipped the answer (41.5% vs 28.6%). A measurement
+    # whose verdict depends on the sampling step is measuring the step.
+    import measure_quick_exit as QE
+    qdata = QE.series()
+
+    def hit_rate(min_ch, step_min=1):
+        tp = sl = 0
+        for sym2, c2 in qdata.items():
+            k = 600
+            while k < len(c2) - 1:
+                j = max(0, k - 480)
+                ch = (c2[k]['close'] - c2[j]['close']) / c2[j]['close'] * 100
+                a = MB.atr_wilder(c2[max(0, k - 100):k + 1]) if ch >= min_ch else 0
+                px2 = c2[k]['close']
+                if a > 0 and a * 2 / px2 * 100 <= 8:
+                    done = False
+                    for j2 in range(k + 1, min(len(c2), k + 161)):
+                        if c2[j2]['low'] <= px2 - a * 2:
+                            sl += 1
+                            done = True
+                            break
+                        if c2[j2]['high'] >= px2 + a * 4:
+                            tp += 1
+                            done = True
+                            break
+                    k += 160 if done else 1
+                    if done:
+                        continue
+                k += 1
+        return tp, sl
+
+    t_all, s_all = hit_rate(0.0)
+    t_g, s_g = hit_rate(15.0)
+    if t_all + s_all > 200 and t_g + s_g > 40:
+        r_all = t_all / (t_all + s_all)
+        r_g = t_g / (t_g + s_g)
+        print(f'      all bars {r_all*100:.1f}% (n {t_all+s_all})   '
+              f'>={15}% {r_g*100:.1f}% (n {t_g+s_g})')
+        check('the momentum gate beats no gate', r_g > r_all,
+              f'{r_g*100:.1f}% vs {r_all*100:.1f}%')
+        # And the honest caveat must be in the code, not only in this test.
+        check('the code states the gate is not proven profitable',
+              'not proven' in src or 'within noise' in src)
+
     # the price filter is a filter: a coin over $2 must be refused outright
     check('an over-$2 coin is refused before scoring',
           'px > kScalp3mMaxPrice' in body and "no('price')" in body)
@@ -173,7 +236,7 @@ def main():
     print('5. the empty screen explains itself correctly')
     check('scalp3m reports the refusing stage',
           'void Function(String stage)? onRefuse' in src)
-    for stage in ('price', 'none', 'data'):
+    for stage in ('price', 'none', 'momentum', 'data'):
         check(f'refusal stage \'{stage}\' exists', f"no('{stage}')" in src)
     check('the scalp branch counts each refusal',
           'onRefuse: (stage) {' in src and '_scalp3mWhy[stage] =' in src)
@@ -226,7 +289,7 @@ def _copy_checks(main_src):
     j = main_src.find('String _scalp3mWhyMessage(', i)
     words = main_src[i:j] if i != -1 and j > i else ''
     check('the word function exists', bool(words))
-    for st in ['price', 'none', 'data']:
+    for st in ['price', 'none', 'momentum', 'data']:
         check(f'stage {st} has words in the row list', f"case '{st}':" in words)
 if __name__ == '__main__':
     sys.exit(main())

@@ -2106,3 +2106,70 @@ mismatches. The count rose from 2 993 because "1 of 2 only" is a signal now.
 constructor and a non-nullable parameter (`thinVolume`) that gained neighbours
 with defaults but had none of its own. Both are the kind of edit corruption that
 a text-level parser accepts.
+
+---
+
+## 37. v19.2 — the momentum trade, and the measurement that nearly fooled me
+
+Item 40. The user sent one completed ADX round trip and asked for that kind of
+trade in the 3M tab, with top gainers used as the filter, emphatically
+("tumi top gain coin gula besi use korba filter er jonno").
+
+**His trade, recomputed from the screenshot:** buy 670 ADX @ 0.0477, sell 669 @
+0.0479, both legs 0.100%. Price +0.419%, fee -0.200%, net **+0.219% (+0.0700
+USDT)**. The fee ate 48% of the move. With the BNB discount on it would have
+been +0.269% -- 23% more profit on the identical trade. The app's `kCostPct` of
+0.25% overstates this account by 25%.
+
+That is the whole design constraint in one line: **the move is small, so the fee
+is the strategy.** Anything with a wide stop is unaffordable.
+
+### What shipped
+
+`kScalp3mMinChange24h = 15.0`, stop `2xATR`, target `4xATR`, hold 160 bars
+(8 h), long only. Universe = `_pickGainers` (24h change descending, range as a
+fallback so a flat market still gives a list). A coin that clears the gate gets
+a plan (Buy / Stop / Target / R:R / fee in R); every other coin still shows
+facts only, so v19.1's "no plan" rule survives for everything ungated.
+
+### The mistake, recorded on purpose
+
+My first pass measured the gate at **41.1%** hit rate versus 33.2% without it
+and the code comment said "the edge". That number was fake. It came from
+sampling one bar every 60. Sampling one bar every 120 gave **28.6%**; every 240
+gave 30.3%, on the same 783 360 bars. A result that inverts when you change an
+arbitrary sampling step is not a result.
+
+Measured properly -- every eligible bar, non-overlapping trades:
+
+| gate | trades | WR (+4ATR before -2ATR) | break-even @0.20% | avg R |
+|---|---|---|---|---|
+| none | 2 633 | 35.7% | 38.4% | **-0.359** |
+| 24h >= +15% | 84 | 38.1% | 38.4% | **-0.034** |
+
+So: the gate is worth a great deal *relative to no gate* (-0.034 vs -0.359), it
+is **not proven profitable at the fee this user pays today**, and 84 trades is
+too few to call anything. Fee ladder on the same 84: 0.20% -0.034 / 0.15%
++0.005 / 0.10% +0.044 / 0.075% +0.063.
+
+The exit choice was not a guess either. A 1xATR stop with a 2.5xATR target
+looked good at 0.075% (+0.059R) and was **negative at every tier down to
+0.075%** once the stop was that tight -- the fee was ~0.5R of a 1xATR stop.
+Widening the stop to 2xATR drops the fee to ~0.15R and is what turned it green,
+not a cheaper fee. Median stop width 1.32%.
+
+### Stated limits
+
+- Sample is 24 pairs and 84 gated trades. Leave-one-pair-out worst case takes
+  it to +0.001R, i.e. one coin could plausibly carry it.
+- The outcome distribution is min -1.36R, median -1.11R, p75 +1.84R, max
+  +1.96R. Most trades lose; a few winners carry the average. That is a
+  psychologically hard curve and the user should know before sizing up.
+- The gate is a 24h-change threshold, which is a *momentum* claim. It survived
+  this test; it is not proven.
+- I will not tune the threshold on 84 trades. 15% stays where the measurement
+  put it.
+
+**Next honest step if this is to be trusted: more pairs, or forward-test it.**
+The test now asserts the gate beats no gate on real bars and asserts that the
+source itself says "not proven", so the caveat cannot quietly disappear.
