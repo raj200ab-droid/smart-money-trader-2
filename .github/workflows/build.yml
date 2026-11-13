@@ -23,6 +23,16 @@ jobs:
           channel: 'stable'
           cache: true
 
+      - name: Stamp and mirror tests
+        run: |
+          python3 tool/mirror/test_stamps.py
+          python3 tool/mirror/test_mirror.py
+          python3 tool/mirror/test_universe.py
+          python3 tool/mirror/test_3m_order.py
+          python3 tool/mirror/test_3m_scalp.py
+          python3 tool/mirror/test_gemini.py
+          python3 tool/mirror/test_3m_parity.py
+
       - name: Create Android Project
         run: |
           cp lib/main.dart /tmp/my_main.dart
@@ -36,11 +46,47 @@ jobs:
       - name: Enable network permission for release builds
         run: python3 tool/patch_manifest.py
 
+      - name: Add device storage for the Gemini key
+        run: python3 tool/patch_prefs.py
+
       - name: Get Dependencies
         run: flutter pub get
 
       - name: Analyze
-        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+        id: analyze
+        continue-on-error: true
+        run: |
+          set +e
+          flutter analyze --no-fatal-infos --no-fatal-warnings 2>&1 | tee analyze.log
+          echo "exit=$?" 
+          exit 0
+
+      # The runner cannot upload where this environment can read, so the log is
+      # published as a workflow ANNOTATION, which comes back through the API.
+      - name: Publish analyze log as annotations
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os
+          p = 'analyze.log'
+          if not os.path.exists(p):
+              print('::error title=analyze::no analyze.log')
+              raise SystemExit(0)
+          lines = [l.rstrip() for l in open(p, encoding='utf-8', errors='replace') if l.strip()]
+          errs = [l for l in lines if ' error • ' in l]
+          print(f'::error title=analyze-summary::{len(errs)} errors, {len(lines)} lines total')
+          for l in errs[:15]:
+              msg = l.replace('%', '%25').replace('\r', '').replace('\n', '%0A')
+              print(f'::error title=analyze::{msg}')
+          for l in lines[:40]:
+              print(l)
+          if not errs:
+              print('::warning title=analyze::no lines matched " error • "')
+          PY
+
+      - name: Fail if analyze failed
+        if: steps.analyze.outcome == 'failure'
+        run: exit 1
 
       - name: Build APK
         run: flutter build apk --release
