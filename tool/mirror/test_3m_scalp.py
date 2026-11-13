@@ -212,6 +212,18 @@ def main():
         check('the code states the gate is not proven profitable',
               'not proven' in src or 'within noise' in src)
 
+    # byGainers must actually REACH the picker. The first version of this
+    # wiring declared the flag on marketScan and used it in _scanOnce, but
+    # never passed it between them -- so it compiled, the flag was set, and the
+    # top-gainer universe was silently never used. Assert the whole chain.
+    _once = src.split('static Future<List<CoinData>> _scanOnce(')
+    check('_scanOnce accepts byGainers',
+          len(_once) == 2 and 'bool byGainers = false' in _once[1][:400])
+    check('marketScan forwards byGainers to _scanOnce (both attempts)',
+          src.count('byVolatility: byVolatility, byGainers: byGainers') == 2)
+    check('the 3M call site passes byGainers',
+          'byGainers: _mode == TradeMode.scalp3m' in src)
+
     # the price filter is a filter: a coin over $2 must be refused outright
     check('an over-$2 coin is refused before scoring',
           'px > kScalp3mMaxPrice' in body and "no('price')" in body)

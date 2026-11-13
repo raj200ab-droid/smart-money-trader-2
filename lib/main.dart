@@ -1016,7 +1016,7 @@ class MarketData {
     var errors = <String>[];
 
     final attempt = await _scanOnce(gainers, losers, errors,
-        byVolatility: byVolatility);
+        byVolatility: byVolatility, byGainers: byGainers);
     if (attempt.isNotEmpty) return attempt;
 
     // Every feed is still cooling down after a failed scan (the skip window).
@@ -1025,7 +1025,7 @@ class MarketData {
       await Future<void>.delayed(const Duration(seconds: 20));
       errors = <String>[];
       final retry = await _scanOnce(gainers, losers, errors,
-          byVolatility: byVolatility);
+          byVolatility: byVolatility, byGainers: byGainers);
       if (retry.isNotEmpty) return retry;
     }
 
@@ -1038,6 +1038,7 @@ class MarketData {
     int losers,
     List<String> errors, {
     bool byVolatility = false,
+    bool byGainers = false,
   }) async {
     for (final feed in _feeds) {
       if (_isDown(feed)) {

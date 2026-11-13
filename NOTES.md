@@ -2173,3 +2173,22 @@ not a cheaper fee. Median stop width 1.32%.
 **Next honest step if this is to be trusted: more pairs, or forward-test it.**
 The test now asserts the gate beats no gate on real bars and asserts that the
 source itself says "not proven", so the caveat cannot quietly disappear.
+
+### The flag that compiled and did nothing
+
+CI caught what tree-sitter could not, and it was the important kind of bug:
+`byGainers` was declared on `marketScan`, used in `_scanOnce`, and **passed
+between neither**. Both functions referenced a variable of the same name in
+their own scope, so the file parsed, every unit test that looked for the string
+passed, and the top-gainer universe the user specifically asked for was never
+actually used -- the scan silently fell back to volume. A gate feature that is
+off is worse than one that is missing, because nothing looks wrong.
+
+Fixed by threading the parameter through both `_scanOnce` attempts, and pinned
+by three assertions (the signature, both forwardings, and the call site) so the
+chain cannot break silently again.
+
+Lesson, and this is the second time it has bitten in this project: **the Dart
+analyzer is the gate, not tree-sitter.** A text parser checks that tokens are
+arranged legally; it cannot check that a name means anything. Never tag without
+CI green.
