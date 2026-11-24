@@ -24,6 +24,9 @@ analysis_options.yaml
 .vscode/
 .DS_Store
 
+# Python bytecode from the measurement mirror
+tool/mirror/__pycache__/
+
 # throttle state (persisted signal count — never commit)
 .throttle_state.json
 __pycache__/

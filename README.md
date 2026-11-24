@@ -41,6 +41,30 @@ pass with a lower threshold and no counter-trend gate. Watch signals are marked
 
 ## Why the list can be empty
 
+The scanner analyses **400 coins** — the top 200 gainers plus the top 200 losers
+of the last 24h, and the count is a target it actually meets. Binance lists
+400-500 USDT pairs, of which only ~150-200 clear 5M USDT/day, so 400 is the
+largest universe that can be filled without descending into pairs nobody
+trades. Stablecoins and
+leveraged tokens are excluded; liquidity is a *preference*, not a filter: pairs
+above 5M USDT/day are chosen first and quieter pairs only fill the remaining
+places. That ordering matters because a hard 5M floor used to be applied inside
+the feed parsers, which silently shrank a "300 coin" scan to ~36 before the
+engine ever saw it (NOTES §15).
+
+Requests are metered, not throttled by worker count. Binance bills klines by
+`limit` (≤500 bars = weight 2, ≤1000 = 5), so the scan asks for exactly the
+engine's windows — 400 4H, 500 1H, 500 15M — and a rolling 900/min budget keeps
+a 300-coin scan inside the public 1200/min allowance instead of being
+rate-limited into a smaller universe. A wider universe does not raise the STRICT
+pass rate (~1%), it only gives more candidates to rank.
+
+4H history is fetched once and then kept as **closed bars only**; the bar that is
+still forming is rebuilt from the fresh 15M series, so the candles the engine
+sees are identical to what the exchange would return (verified: 3840 cases, 0
+mismatches). That halves the request count of a scan. A pair that fails is left
+alone for 15 minutes instead of five mirror attempts on every scan.
+
 The scanner runs three tiers and labels every card:
 
 | tier | meaning |
@@ -53,12 +77,14 @@ The status panel also prints the build stamp (`v4 · radar`) and `pubspec.yaml`
 carries `4.0.0+4`, so the build installed on the phone is identifiable.
 
 The scanner reports *why* it found nothing. The status line tells you which of
-the two failure modes dominates across the 73 scanned coins:
+the two failure modes dominates across the scanned coins:
 
-- `N/73 coin-e 4H trend nei` — the higher timeframe has no confirmed structure
+- `N/300 coin-e 4H trend nei` — the higher timeframe has no confirmed structure
   break, so nothing is tradable by design
 - `N coin-e 4H trend ache, kintu 15M trigger/zone mile nai` — bias exists but
   the 1H OB/FVG or the 15M trigger is missing
+- `N notun coin (4H history kom)` — listed too recently to have 400 bars of 4H
+  structure; counted apart so it cannot be blamed on "no trend"
 
 Below the empty state a **"kache kache eshechilo"** list shows each coin's
 diagnosis and its score against the threshold, which is the data needed to
@@ -94,9 +120,21 @@ being folded into the win rate. The backtest pulls ~40 days of 15M history by
 paging Binance klines (1000 rows per request) and degrades the 4H bias window
 from 400 to 200 to 120 bars when a listing is younger than that.
 
-Read the **total R**, not the win rate: at 2R targets a 40% win rate is
-profitable, while a 60% win rate at 1R can still lose. A sample of a few dozen
-trades is directional evidence, not proof.
+Read the **total R**, not the win rate. The take profit is the 15M swing level,
+used only when it is worth at least **1.5R** (otherwise the target falls back to
+2R), and the stop is structure-based. That floor exists because live data
+shipped a SELL risking 3.50% for a 0.98% target (RR 1:0.28) and another risking
+4.54% for 0.51% (RR 1:0.11) — trades that needed a 78–90% hit rate just to break
+even. The screen prints the win rate, the total R, the implied R:R and the
+break-even win rate together, plus the result after 0.25% fees+spread, because a
+high win rate on its own is not a result (NOTES §14). A fixed 1.05%
+target was tried and measured: it lifted the win rate from 38.9% to 75.6% and
+turned +13.4R into −8.4R, so it was removed again (NOTES §11–12).
+
+The backtest pulls up to 12000 bars of 15M history (~125 days) from live Binance
+klines, paged 1000 rows at a time, so a fast-resolving fixed target still
+produces hundreds of decided trades. A sample of a few dozen is directional
+evidence, not proof.
 
 ## Signal output
 

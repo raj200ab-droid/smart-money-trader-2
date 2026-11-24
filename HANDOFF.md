@@ -5,8 +5,9 @@ without losing a single decision, number, or promise. Read it top to bottom
 before touching anything. If something here conflicts with the code, the code
 wins — then update this file.
 
-Last updated: 2026-11-05 · branch `arena/ad2b42dc-smart-money-trader-2` ·
-PR #1 open · 23 commits ahead of `main` · `lib/main.dart` = 3454 lines
+Last updated: 2026-11-08 · branch `arena/5182e84b-smart-money-trader-2` ·
+build `v9 · diag` / `9.0.0+9` · `lib/main.dart` ≈ 3600 lines ·
+PR #1 merged; this branch is the 300-coin work
 
 ---
 
@@ -157,6 +158,122 @@ UI leads with total R.
   backtest path was reworked.
 - **No backtest numbers from the fixed build have been reported yet.**
 
+## 8b. v5 · 300 — the 300-coin scan (2026-11-08)
+
+Asked for 300 coins, then: *"কোন ধরনের চেঞ্জ করবে না আগে যে নিয়মে চলত সেই নিয়মেই যেন
+থাকে"*. So the engine was not touched — see NOTES.md §9 for the full diff list.
+
+- universe `150 + 150`; the scorer, tiers, SL/TP and windows are byte-identical
+- closed-bar 4H cache + forming bar rebuilt from the fresh 15M series
+  (**3840/3840 cases identical to the exchange's own 4H**, drift-guarded test in
+  `/home/user/smt-verify/verify_4h_cache.py`)
+- warm cache: 3× the coins for 2× the requests (600), 66 s scan, 58 MB
+- device numbers for this build are **not in yet** — that is the next open item
+
+## 8c. v6 · unify — dead score removed, EQH/EQL repaired (2026-11-08)
+
+The user noticed that `analyze()` computed `buyScore/sellScore`/`buyConf`/`sellConf`
+that `multiTF` never read, and that EQH/EQL was display-only. Both were real.
+
+- **deleted** 83 lines + 7 fields of scoring nothing consumed (`sweep`, `bos`,
+  `choch` included). `multiTF` is now the only score in the program.
+- **EQH/EQL was unreachable**: 0.1×ATR over *swing* pivots = 0/48 true.
+  Now internal pivots at 0.5×ATR = 29%. Still **display-only**, on purpose.
+- **`internalFresh`/`internalEvent` were never assigned**, so the WATCH pass's
+  internal-break trigger and the RADAR fallback could never fire. Wired up.
+- EQH/EQL as a *score/veto* was measured (84 paired series, 4 regimes) and moved
+  the result by at most one trade — see NOTES.md §10 for the table. Not shipped
+  as a rule; the code comment says why.
+
+`/home/user/smt-verify/mirror.py` is the Python mirror again (the old `smt-mirror`
+was gone). Fix `swings()` if it ever drifts — it is verified against the naive
+form.
+
+## 8d. v7 · tp1.05 — fixed 1.05% target (2026-11-08)
+
+Requested: real data, TP = 1.05% only, more candles, "good result every test".
+
+- TP is now `kTpPct = 1.05%` from entry for **every** signal (scan and backtest).
+  **The stop is unchanged**, so R:R is set by the stop, not by the target.
+- trades whose stop is closer than the target are **rejected** (guaranteed loss).
+- backtest: 12000 15M bars (~125 days), 4H 1500, 1H 3000, maxTrades 2000.
+- report prints win rate **and** total R, plus R:R, break-even WR, and the
+  result after 0.25% costs.
+
+Measured on the mirror **before** shipping: 643 trades, **75.6% win rate,
+−8.4R**. The win rate rose and the expectancy went negative — NOTES.md §11 has
+the table and the arithmetic. Do not "fix" this by raising the target without
+measuring; the same table shows 2.0% is only break-even.
+
+## 8e. v8 · swingTP — fixed target reverted (2026-11-08)
+
+The 1.05% take profit added in v7 was removed at the user's request. Target is
+`15M swing else 2R` again. Kept from v7: the deeper backtest sample (12000 15M
+bars), `maxTrades` 2000, the richer report (win rate + total R + R:R +
+break-even + cost), and `tool/mirror/` in the repo.
+
+Justification for the revert is the paired table in NOTES §11: 38.9% WR /
++13.4R with the swing target vs 75.6% WR / −8.4R with the fixed one.
+
+## 8f. v9 · diag — two bugs found from a device screenshot (2026-11-09)
+
+- **OKX reported BASE volume** in `volCcy24h` while `_isTradable` compares
+  against a 5M *USDT* floor. With Binance geo-blocked the app falls back to OKX,
+  and a "300 coin" scan came back with **35**. Fixed by converting to quote.
+- **The structure floor vetoed passing scores silently**: near-miss cards read
+  `score 55/40` with no signal. Measured: the floor kills **39% (174/449)** of
+  score-passing setups. The trace now names the gate. **The floor is kept** —
+  it is the fix for the all-SELL bug — and the user wants device numbers before
+  touching it.
+- A universe under 120 coins now says so on screen, with
+  `raw -> tradable -> picked`.
+
+## 8g. v10 · rrGate — a trade may no longer risk more than it can win (2026-11-09)
+
+Two device screenshots (00:55 and 01:05) shipped trades whose own arithmetic was
+impossible: SOL SELL risk 3.50% / reward 0.98% (**RR 1:0.28**) and ETH SELL risk
+4.54% / reward 0.51% (**RR 1:0.11**). Breakeven for the ETH trade is a ~90% win
+rate. The v9 target rule asked only "is the 15M swing beyond entry?", a 0.5%
+test, not a quality test.
+
+- **`kMinRR = 1.5`**: the swing target is accepted only at >= 1.5R, else 2R.
+  Measured (`measure_v10_final.py`, 0.25% cost): v9 −13.7R net over 208 closed
+  trades, v10 −12.0R over 196. Both negative, all CIs straddle zero — the claim
+  is only that 33 trades (16%) needing a 78–90% hit rate are now refused.
+- **A 2.5% stop cap was proposed and then measured and reverted.** The narrow
+  stop bucket is the *losing* one (`stop<=2.5%`: net −18.4R; `2.5–8%`: +9.8R).
+  The 8% bound is back in all three places.
+- **`BOS 대 Unknown` on every card**: `premium` was only set when a confirmed
+  swing high *and* low existed. Fallback to the window range at >= 20 bars.
+- **`4H cache 0/0+36`**: the hit test demanded `merged.length >= lim` while the
+  cache structurally holds one bar fewer. Now `>= lim - 1`; the cache can
+  actually warm and a scan stops refetching 36 x 600 4H bars.
+- Done state now prints `raw ticker → tradable → picked`, because why the
+  universe is 36 and not 300 is still **unexplained**.
+
+## 8h. v11 · 300coin — the universe is finally 300 (2026-11-09)
+
+Two defects, either fatal alone:
+
+1. **The 5M USDT floor lived inside all four ticker parsers.** A 300-coin scan
+   never had 300 candidates; every sub-$5M pair was gone before `_pick`. That is
+   the whole of "35 / 38 / 36 coins". The floor still exists but as a
+   *preference*: `selectUniverse()` returns strong pairs (>5M/day) first and
+   tops up to the target from the quiet tier. `_isListed()` now checks only
+   pair shape. `_pick` also fills its shortfall, so 300 means 300.
+2. **600 bars per timeframe × 3 × 300 coins = 4500 weight against a 1200/min
+   Binance budget (3.2× over).** The coins that get rate-limited are the ones
+   that vanish. The scan now requests 400/500/500 — exactly the engine's
+   windows — for weight 6/coin, and `reserveWeight()` meters a rolling
+   900/min budget so worker count no longer controls request rate.
+
+Plus: `_cache4hMax` 320 → 400 (it was evicting every series on a wide scan,
+making the hit path impossible), and the funnel line is now always on screen:
+`raw ticker → listed (strong) → analysed`.
+
+**No engine rule changed** — same windows, scores, gates, targets, stops; the
+scan just receives 300 coins instead of 36.
+
 ## 9. Open items
 
 1. **New repo blocked.** He created `smart-money-new-version-` (private). The
@@ -168,8 +285,11 @@ UI leads with total R.
 2. **PR #1 is still open**, so `NOTES.md` / `HANDOFF.md` are only on the branch —
    `main` does not have them. He asked why "the note is not copying"; the answer
    is: not merged yet.
-3. **Device backtest numbers** for the fixed build — trades, OPEN count, total R,
-   BUY/SELL split.
+3. **Device check for v11** — the funnel should now read roughly
+   `2800 ticker → 450 listed (165 strong) → 300 analysed`, and the second scan
+   should show `4H cache` hits instead of `0/0+36`. If `analysed` is still low,
+   the funnel line says which tier failed. Still no device backtest numbers
+   (trades / WR / total R), so no engine tuning is justified.
 4. Offered, not built: STRICT-only toggle, breakeven/trailing stops,
    liquidity-based TP.
 
