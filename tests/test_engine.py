@@ -366,6 +366,35 @@ def test_prices_for_trade():
         assert bt["win_rate"] == bb.BACKTEST_WIN_RATE and bt["rr_model"] == bb.BACKTEST_RR
 
 
+def test_forming_candle_dropped():
+    """A candle that has not closed is never used — its prices still move."""
+    import time as _time
+    g = 180
+    now = float(int(_time.time()))
+    t0 = now - (now % g)                       # current candle window opened here
+    complete = Bar(int(t0) - g, 100, 101, 99, 100.5)   # closed
+    forming = Bar(int(t0), 100, 101, 99, 100.2)        # still forming
+    out = bb.drop_forming([complete, forming], g, now=now)
+    assert out == [complete]
+    # everything complete -> everything kept
+    assert bb.drop_forming([Bar(int(t0) - 3 * g, 1, 2, 1, 2),
+                            Bar(int(t0) - 2 * g, 1, 2, 1, 2)], g, now=now) != []
+
+
+def test_fetch_candles_drops_forming():
+    import time as _time
+    from binary_bot import FakeWS
+    g = 180
+    now = int(_time.time())
+    t0 = now - (now % g)
+    ws = FakeWS({"ticks_history": {"candles": [
+        {"epoch": t0 - g, "open": "100", "high": "101", "low": "99", "close": "100.5"},
+        {"epoch": t0, "open": "100", "high": "101", "low": "99", "close": "100.2"},
+    ]}})
+    bars = bb.fetch_option_candles(ws, "R_100", granularity=g, count=10, cache=False)
+    assert len(bars) == 1 and bars[0].time == t0 - g
+
+
 def test_market_close():
     bars = [mkbar(i, 1.10, 1.30, 1.10, 1.10) for i in range(30)]   # Put > 3% from close
     res = bb.prices_for_trade("EURUSD", "PUT", bars, live=True)

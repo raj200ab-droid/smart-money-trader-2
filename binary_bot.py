@@ -27,6 +27,8 @@ The engine rulebook (kept explicit; the user verifies rules, not vibes):
     OVER/UNDER use the fixed 2.0 / 8.0 threshold via over_digit_map.
   * STRICT_MODE=1 is always on: DIGIT_TOKEN_REQUIRED=1, REVERSE_ENGINEERING=1,
     DYNAMIC_THRESHOLD=1, VOL_100_1s / VOL_200_1s / VOL_300_1s blocked.
+  * Decisions use COMPLETED candles only — a still-forming candle is dropped
+    (drop_forming), because its LOW/HIGH/CLOSE can still change.
   * 3m/3m throttle: 180s candles, 180s expiry, one signal per 3-min boundary
     (minute % 3 == 0), 3-min wait before the first entry, 3-min wait after
     every 3 signals. 30m/30m and 60m/60m variants wait 30 / 60 minutes.
@@ -542,6 +544,17 @@ def resolve_close(bar: Bar, contract_type: str) -> float:
     return bar.close
 
 
+def drop_forming(bars, granularity: int = 180, now: float | None = None):
+    """
+    Keep only COMPLETED candles. A still-forming candle's LOW/HIGH/CLOSE
+    can change before it closes — never decide on one.
+    """
+    if not bars:
+        return bars
+    now_ts = time.time() if now is None else now
+    return [b for b in bars if b.time + granularity <= now_ts]
+
+
 def prices_for_trade(symbol: str, contract_type: str, bars, live: bool = True,
                      balance: float = 1000.0) -> dict:
     """
@@ -784,10 +797,12 @@ def _cache_key(*parts):
 
 def fetch_option_candles(ws, symbol: str, timeframe: str = "3m", granularity: int = 180,
                          count: int = 1000, contract_type: str = "CALL",
-                         cache: bool = True, cache_ttl: float = 3600.0):
+                         cache: bool = True, cache_ttl: float = 3.0):
     """
     Candles from ticks history. `contract_type` selects which price the entry
     rule will use later (resolve_close): CALL->LOW, PUT->HIGH, DIGIT*->CLOSE.
+    Only completed candles are returned (drop_forming) and the cache is short
+    (3s) so a live decision always sees the just-closed candle, not stale bars.
     """
     key = _cache_key("candles", symbol, timeframe, granularity, count, contract_type)
     if cache and key in _CACHE:
@@ -818,6 +833,7 @@ def fetch_option_candles(ws, symbol: str, timeframe: str = "3m", granularity: in
     raw = data.get("candles", [])
     bars = [Bar(int(c["epoch"]), float(c["open"]), float(c["high"]),
                 float(c["low"]), float(c["close"])) for c in raw]
+    bars = drop_forming(bars, granularity)      # completed candles only
     if cache:
         _CACHE[key] = (time.time(), bars)
     return bars
@@ -1046,6 +1062,7 @@ def main(argv=None) -> int:
             raw = bars.get("candles", [])
             bars = [Bar(int(c["epoch"]), float(c["open"]), float(c["high"]),
                         float(c["low"]), float(c["close"])) for c in raw]
+            bars = drop_forming(bars, granularity)   # completed candles only
             ticks = await ws.send({"ticks_history": args.symbol, "ticks": 300, "end": "latest"},
                                   timeout=25.0)
             ticks = [{"epoch": int(t["epoch"]), "price": float(t["quote"])}
