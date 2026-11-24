@@ -250,6 +250,51 @@ def test_throttle_30_60():
     assert not ok
 
 
+def test_throttle_persists():
+    """A refresh/restart must NOT reset the signal count or skip the break."""
+    import json
+    import tempfile
+    path = os.path.join(tempfile.mkdtemp(), "throttle.json")
+    base = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    base -= timedelta(minutes=base.minute % 3)          # align to a 3-min boundary
+
+    # the warm-up survives a refresh: the session clock is not restarted
+    t1 = bb.Throttle(cadence_min=3, state_path=path, key="R_100:CALL:3m")
+    t2 = bb.Throttle(cadence_min=3, state_path=path, key="R_100:CALL:3m")   # "refresh"
+    ok, why = t2.allow(base + timedelta(minutes=1))
+    assert not ok and "first entry" in why
+    assert t2.started == t1.started
+
+    # 3 signals -> break; a refresh cannot bypass the break
+    t3 = bb.Throttle(cadence_min=3, state_path=path, key="R_100:CALL:3m")
+    t3.started = base - timedelta(minutes=30)
+    t3._save_state()
+    for k in (0, 3, 6):
+        ok, why = t3.allow(base + timedelta(minutes=k))
+        assert ok, why
+        t3.record(base + timedelta(minutes=k))
+    t4 = bb.Throttle(cadence_min=3, state_path=path, key="R_100:CALL:3m")   # "refresh"
+    assert t4.signals == 3
+    ok, why = t4.allow(base + timedelta(minutes=9))
+    assert not ok and "cooldown" in why
+    ok, _ = t4.allow(base + timedelta(minutes=12))
+    assert ok
+
+    # more than STATE_SESSION_HOURS off -> a new session, counting starts over
+    data = json.load(open(path))
+    data["R_100:CALL:3m"]["updated"] = (
+        datetime.now(timezone.utc) - timedelta(hours=bb.STATE_SESSION_HOURS + 1)).isoformat()
+    with open(path, "w") as f:
+        json.dump(data, f)
+    t5 = bb.Throttle(cadence_min=3, state_path=path, key="R_100:CALL:3m")
+    assert t5.signals == 0
+
+    # --reset clears the count deliberately
+    assert bb.reset_throttle_state(path, "R_100:CALL:3m")
+    t6 = bb.Throttle(cadence_min=3, state_path=path, key="R_100:CALL:3m")
+    assert t6.signals == 0
+
+
 # ──────────────────────────── session + risk ────────────────────────────────
 def test_session_marker():
     utc = timezone.utc

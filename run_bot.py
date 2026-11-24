@@ -11,6 +11,9 @@ run_bot.py — scan-loop driver for binary_bot.py.
      so at most one signal every 3 minutes.
   5. After every 3 signals → 3-min wait (cooldown).
   6. The 30m/30m and 60m/60m variants wait 30 / 60 minutes instead.
+  7. The count is PERSISTED in --state-file (default .throttle_state.json):
+     a restart / refresh does NOT reset it. More than 6h off starts a new
+     session. --reset clears the count deliberately.
 
   Plus the engine rulebook (gap-too-big 1.5 / 10.0, session gate, 1% risk,
   1:3 RR, digit HOT/COLD) — see binary_bot.py's module docstring.
@@ -53,6 +56,9 @@ def parse_args(argv=None):
     p.add_argument("--no-cache", action="store_true")
     p.add_argument("--session-warm", type=int, default=300, help="seconds of history warm-up")
     p.add_argument("--json", action="store_true", help="one JSON line per scan")
+    p.add_argument("--state-file", default=bb.STATE_FILE_DEFAULT,
+                   help="where the signal count is persisted")
+    p.add_argument("--reset", action="store_true", help="reset the persisted signal count")
     return p.parse_args(argv)
 
 
@@ -96,6 +102,7 @@ def scan_once(ws, args, throttle, stats: bb.SessionStats) -> dict:
         "timeframe": args.timeframe,
         "expiry": args.expiry,
         "session": bb.session_name(now),
+        "signals": throttle.signals,
         "decision": decision,
     }
     if args.probe_gaps:
@@ -114,7 +121,12 @@ def run(argv=None) -> int:
     args = parse_args(argv)
     ct = args.contract_type_alt or args.contract_type
     args.contract_type = ct.upper()
-    throttle = bb.make_throttle(args.expiry)
+    state_key = f"{args.symbol}:{args.contract_type}:{args.expiry}"
+    if args.reset:
+        bb.reset_throttle_state(args.state_file, state_key)
+        print(json.dumps({"reset": args.state_file, "key": state_key}))
+        return 0
+    throttle = bb.make_throttle(args.expiry, state_path=args.state_file, key=state_key)
     stats = bb.SessionStats()
     started = time.time()
     scans = 0

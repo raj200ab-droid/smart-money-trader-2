@@ -30,6 +30,8 @@ The engine rulebook (kept explicit; the user verifies rules, not vibes):
   * 3m/3m throttle: 180s candles, 180s expiry, one signal per 3-min boundary
     (minute % 3 == 0), 3-min wait before the first entry, 3-min wait after
     every 3 signals. 30m/30m and 60m/60m variants wait 30 / 60 minutes.
+    The count is PERSISTED (.throttle_state.json) — restart/refresh does not
+    reset it; > 6h off starts a new session; --reset clears it.
 """
 from __future__ import annotations
 
@@ -110,6 +112,8 @@ FIRST_ENTRY_WAIT_MIN = 3
 SIGNAL_CADENCE_MIN = 3
 SIGNAL_BATCH = 3
 SIGNAL_BATCH_WAIT_MIN = 3
+STATE_FILE_DEFAULT = ".throttle_state.json"
+STATE_SESSION_HOURS = 6     # > 6h off -> new session, counting starts over
 
 # session gate
 SESSION_MIN_TRADES = 20
@@ -583,20 +587,77 @@ def signal_3m_expires(now: datetime | None = None, cadence: int = SIGNAL_CADENCE
 class Throttle:
     """
     3m/3m rules:
-      * 3-min wait before the first entry after start (warm-up)
+      * 3-min wait before the first entry after session start (warm-up)
       * one signal per 3-min boundary (minute % 3 == 0)
       * after every 3 signals -> 3-min wait
       * 30m/30m and 60m/60m variants use 30 / 60-minute waits
+      * the count is PERSISTED in a state file: restart / refresh does NOT
+        reset it; a gap longer than STATE_SESSION_HOURS starts a new session
     """
 
     def __init__(self, cadence_min: int = SIGNAL_CADENCE_MIN, batch: int = SIGNAL_BATCH,
-                 started: datetime | None = None):
+                 started: datetime | None = None, state_path: str | None = None,
+                 key: str | None = None):
         self.cadence = cadence_min
         self.batch = batch
-        self.started = started or now_utc()
+        self.state_path = state_path
+        self.key = key or f"cadence{cadence_min}"
+        self.started = started
         self.signals = 0
         self.last_signal: datetime | None = None
         self.cooldown_until: datetime | None = None
+        if self.started is None and self.state_path:
+            self._load_state()
+        if self.started is None:
+            self.started = now_utc()
+        if self.state_path:
+            self._save_state()
+
+    # ── persisted state: a refresh / restart must not reset the count ──
+    def _read(self) -> dict:
+        try:
+            with open(self.state_path) as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _load_state(self):
+        entry = self._read().get(self.key)
+        if not isinstance(entry, dict):
+            return
+        try:
+            updated = datetime.fromisoformat(entry.get("updated", ""))
+        except ValueError:
+            return
+        if (now_utc() - updated) > timedelta(hours=STATE_SESSION_HOURS):
+            return                      # off too long -> fresh session
+        try:
+            self.started = datetime.fromisoformat(entry["started"])
+            self.signals = int(entry.get("signals", 0))
+            self.last_signal = (datetime.fromisoformat(entry["last_signal"])
+                                if entry.get("last_signal") else None)
+            self.cooldown_until = (datetime.fromisoformat(entry["cooldown_until"])
+                                   if entry.get("cooldown_until") else None)
+        except (KeyError, ValueError, TypeError):
+            return
+
+    def _save_state(self, now: datetime | None = None):
+        if not self.state_path:
+            return
+        data = self._read()
+        data[self.key] = {
+            "started": self.started.isoformat(),
+            "signals": self.signals,
+            "last_signal": self.last_signal.isoformat() if self.last_signal else None,
+            "cooldown_until": self.cooldown_until.isoformat() if self.cooldown_until else None,
+            "updated": (now or now_utc()).isoformat(),
+        }
+        try:
+            with open(self.state_path, "w") as f:
+                json.dump(data, f)
+        except OSError:
+            pass
 
     def allow(self, now: datetime | None = None) -> tuple:
         """Returns (allowed, reason)."""
@@ -616,9 +677,11 @@ class Throttle:
         if self.signals % self.batch == 0:
             wait = SIGNAL_BATCH_WAIT_MIN if self.cadence == SIGNAL_CADENCE_MIN else self.cadence
             self.cooldown_until = now + timedelta(minutes=wait)
+        self._save_state(now)
 
 
-def make_throttle(expiry: str) -> Throttle:
+def make_throttle(expiry: str, state_path: str | None = None,
+                  key: str | None = None) -> Throttle:
     """--expiry 3m -> 3-min waits; 30m -> 30-min; 60m -> 60-min."""
     e = (expiry or "3m").lower()
     minutes = 3
@@ -628,7 +691,28 @@ def make_throttle(expiry: str) -> Throttle:
         minutes = int(e[:-1]) * 60
     elif e.isdigit():
         minutes = int(e)
-    return Throttle(cadence_min=minutes)
+    return Throttle(cadence_min=minutes, state_path=state_path, key=key)
+
+
+def reset_throttle_state(path: str, key: str | None = None) -> bool:
+    """--reset: clear the persisted count (one key, or the whole file)."""
+    try:
+        if key is None:
+            if os.path.exists(path):
+                os.remove(path)
+            return True
+        data = {}
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            pass
+        data.pop(key, None)
+        with open(path, "w") as f:
+            json.dump(data, f)
+        return True
+    except OSError:
+        return False
 
 
 # ────────────────────────────── Deriv WS plumbing ───────────────────────────
@@ -918,11 +1002,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force-trade", nargs="+", metavar=("TYPE", "PRICE"),
                    help="CONTRACT_TYPE price [digit] [duration_unit s/m] [duration]")
     p.add_argument("--backtest", action="store_true")
+    p.add_argument("--state-file", default=STATE_FILE_DEFAULT)
+    p.add_argument("--reset", action="store_true", help="reset the persisted signal count")
     return p
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    state_key = f"{args.symbol}:{args.contract_type}:{args.expiry}"
+
+    if args.reset:
+        reset_throttle_state(args.state_file, state_key)
+        print(json.dumps({"reset": args.state_file, "key": state_key}))
+        return 0
 
     if args.force_trade:
         ft = list(args.force_trade)
@@ -958,7 +1050,7 @@ def main(argv=None) -> int:
                                   timeout=25.0)
             ticks = [{"epoch": int(t["epoch"]), "price": float(t["quote"])}
                      for t in ticks.get("history", {}).get("prices", [])]
-            throttle = make_throttle(args.expiry)
+            throttle = make_throttle(args.expiry, state_path=args.state_file, key=state_key)
             decision = check_single_type_live(args.symbol, args.contract_type, bars,
                                               ticks=ticks, throttle=throttle)
             print(json.dumps(decision))

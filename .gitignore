@@ -23,3 +23,7 @@ analysis_options.yaml
 .idea/
 .vscode/
 .DS_Store
+
+# throttle state (persisted signal count — never commit)
+.throttle_state.json
+__pycache__/
